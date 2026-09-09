@@ -1,18 +1,30 @@
 """
 Web GIS Backend: Sistem Deteksi Kesehatan Sawit Berbasis Poligon Kustom
 =======================================================================
-Menggunakan Flask, Google Earth Engine, dan Pipeline 2-Layer AI
+Menggunakan Flask, Google Earth Engine, dan Pipeline Machine Learning 2-Layer (XGBoost)
 """
 
 import sys
 import os
+import time
 import json
 import numpy as np
 import pandas as pd
 from flask import Flask, render_template, request, jsonify, Response
 import ee
 
-sys.stdout.reconfigure(encoding='utf-8')
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+# Import module inferensi machine learning
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from predict_point_or_csv import predict_pipeline, FEATURES
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 
@@ -62,30 +74,39 @@ def predict_polygon():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 def process_gee_polygon(coords, year):
-    """Memproses poligon nyata di Google Earth Engine."""
+    """Memproses poligon nyata di Google Earth Engine dan memprediksi dengan XGBoost."""
+    t_start_total = time.time()
     aoi = ee.Geometry.Polygon(coords)
     
-    # Koleksi Sentinel-2
     start_date = f"{year}-01-01"
     end_date   = f"{year}-12-31"
     
+    t_gee_0 = time.time()
     s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
         .filterBounds(aoi) \
         .filterDate(start_date, end_date) \
         .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 45)) \
         .median() \
-        .select(['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12']) \
+        .divide(10000.0) \
         .clip(aoi)
         
-    # Band dan Indeks Spektral Sentinel-2 Komprehensif
+    raw_bands = s2.select(['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12'])
     ndvi = s2.normalizedDifference(['B8', 'B4']).rename('NDVI')
-    ndre = s2.normalizedDifference(['B8A', 'B5']).rename('NDRE')
+    evi = s2.expression('2.5 * (NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1)',
+        {'NIR': s2.select('B8'), 'RED': s2.select('B4'), 'BLUE': s2.select('B2')}).rename('EVI')
+    savi = s2.expression('1.5 * (NIR - RED) / (NIR + RED + 0.5)',
+        {'NIR': s2.select('B8'), 'RED': s2.select('B4')}).rename('SAVI')
+    ndre = s2.normalizedDifference(['B8', 'B5']).rename('NDRE')
+    ndwi = s2.normalizedDifference(['B3', 'B8']).rename('NDWI')
     ndbi = s2.normalizedDifference(['B11', 'B8']).rename('NDBI')
     msi  = s2.select('B11').divide(s2.select('B8').add(1e-6)).rename('MSI')
-    nir_red = s2.select('B8').divide(s2.select('B4').add(1e-6)).rename('NIR_RED')
-    b4   = s2.select('B4').divide(10000.0).rename('B4')
-    
-    composite = ee.Image.cat([ndvi, ndre, ndbi, msi, nir_red, b4])
+
+    # GLCM Texture extraction
+    nir_scaled = s2.select('B8').multiply(64).toInt().rename('NIR_scaled')
+    glcm = nir_scaled.glcmTexture(size=3)
+    texture = glcm.select(['NIR_scaled_contrast', 'NIR_scaled_var', 'NIR_scaled_ent']).rename(['GLCM_Contrast', 'GLCM_Variance', 'GLCM_Entropy'])
+
+    composite = raw_bands.addBands([ndvi, evi, savi, ndre, ndwi, ndbi, msi, texture])
     
     # Hitung estimasi luas area (hektar)
     area_sqm = aoi.area().getInfo()
@@ -95,84 +116,78 @@ def process_gee_polygon(coords, year):
     scale = 10 if area_ha < 100 else 20
     sampled = composite.sample(region=aoi, scale=scale, geometries=True, numPixels=2500)
     features = sampled.getInfo().get('features', [])
+    t_gee_1 = time.time()
+    gee_time_sec = round(t_gee_1 - t_gee_0, 2)
     
-    # Parsing ke list titik
+    # Parsing ke DataFrame
+    records = []
+    for f in features:
+        props = f.get('properties', {})
+        geom_coords = f.get('geometry', {}).get('coordinates', [0, 0])
+        props['lon'] = geom_coords[0]
+        props['lat'] = geom_coords[1]
+        records.append(props)
+        
+    df = pd.DataFrame(records)
+    if len(df) == 0:
+        return {
+            'points': [],
+            'summary': {
+                'area_ha': area_ha, 'total_points': 0, 'palm_points': 0,
+                'filtered_points': 0, 'healthy_count': 0, 'healthy_pct': 0,
+                'stressed_count': 0, 'stressed_pct': 0, 'sick_count': 0, 'sick_pct': 0,
+                'alert': 'Tidak ada data', 'alert_class': 'warning',
+                'ml_timing': {'elapsed_sec': 0, 'elapsed_ms': 0, 'ms_per_sample': 0},
+                'gee_time_sec': gee_time_sec
+            }
+        }
+        
+    # Jalankan Prediksi dengan Model Machine Learning (XGBoost)
+    df_pred, ml_timing = predict_pipeline(df, return_timing=True)
+    
+    # Pemetaan hasil prediksi ke titik visualisasi Web GIS
     points = []
     sick_count = 0
     stressed_count = 0
     healthy_count = 0
-    non_veg_count = 0
-    non_palm_count = 0
+    young_count = 0
+    filtered_count = 0
     
-    mean_ndre, std_ndre = 0.589, 0.037
-    mean_ndvi, std_ndvi = 0.822, 0.031
-    mean_msi,  std_msi  = 0.548, 0.052
-    
-    for f in features:
-        props = f.get('properties', {})
-        geom_coords = f.get('geometry', {}).get('coordinates', [0, 0])
+    for _, row in df_pred.iterrows():
+        status = row['health_status']
+        vigor = row.get('vigor_score')
+        vigor_val = round(float(vigor), 2) if pd.notnull(vigor) else None
         
-        lon, lat = geom_coords[0], geom_coords[1]
-        val_ndvi = float(props.get('NDVI', 0))
-        val_ndre = float(props.get('NDRE', 0))
-        val_ndbi = float(props.get('NDBI', 0))
-        val_msi  = float(props.get('MSI', 0))
-        val_ratio = float(props.get('NIR_RED', 0))
-        val_b4   = float(props.get('B4', 0))
-        
-        # 1. LAYER 1: FILTER NON-VEGETASI (Jalan Aspal, Atap Seng/Rumah, Tanah Gundul, Semen, Air)
-        # Karakteristik: NDBI tinggi/positif, rasio NIR/Red rendah, pantulan merah tinggi
-        if (val_ndvi < 0.48) or (val_ndbi > -0.06) or (val_ratio < 2.8) or (val_b4 > 0.085):
-            status = 'Bukan Vegetasi (Jalan / Bangunan / Tanah)'
-            color = '#94a3b8'
-            non_veg_count += 1
-            vigor = -999
-            
-        # 2. LAYER 2: FILTER NON-SAWIT (Bahu Jalan Berumput, Pekarangan Rumah Warga, Semak Belukar)
-        # Karakteristik kanopi sawit rapat: NDBI <= -0.15, NIR/Red >= 4.5, NDVI >= 0.65, B4 <= 0.060
-        elif (val_ndbi > -0.15) or (val_ratio < 4.5) or (val_ndvi < 0.65) or (val_b4 > 0.060):
-            status = 'Non-Sawit (Bahu Jalan / Pekarangan / Semak)'
-            color = '#64748b'
-            non_palm_count += 1
-            vigor = -999
-            
-        # 3. LAYER 3: HEALTH ASSESSMENT KHUSUS KANOPÍ KELAPA SAWIT SEJATI
+        if '🔴' in status or 'Sakit' in status:
+            color = '#e74c3c'
+            sick_count += 1
+        elif '🟢' in status or 'Sehat' in status:
+            color = '#2ecc71'
+            healthy_count += 1
+        elif '🟡' in status or 'Stres' in status:
+            color = '#f1c40f'
+            stressed_count += 1
+        elif 'Muda' in status:
+            color = '#3498db'
+            young_count += 1
         else:
-            z_ndre = (val_ndre - mean_ndre) / std_ndre
-            z_ndvi = (val_ndvi - mean_ndvi) / std_ndvi
-            z_msi  = (val_msi  - mean_msi)  / std_msi
-            vigor  = (0.45 * z_ndre) + (0.35 * z_ndvi) - (0.20 * z_msi)
+            color = '#94a3b8'
+            filtered_count += 1
             
-            # Sawit Sakit Sejati (Ganoderma / Klorosis Berat / Crown Dieback):
-            # Tajuk pohon mengalami penurunan klorofil drastis (NDRE < 0.46) DAN dehidrasi pelepah (MSI > 0.65)
-            if (val_ndre < 0.46 and val_ndvi < 0.72 and val_msi > 0.65) or (vigor < -2.2):
-                status = '🔴 SAWIT SAKIT (Target Karantina)'
-                color = '#e74c3c'
-                sick_count += 1
-            elif val_ndvi >= 0.76 and val_ndre >= 0.52 and val_msi <= 0.65:
-                status = '🟢 Sawit Sehat Prima'
-                color = '#2ecc71'
-                healthy_count += 1
-            else:
-                status = '🟡 Stres Ringan (Pupuk/Air)'
-                color = '#f1c40f'
-                stressed_count += 1
-                
         points.append({
-            'lat': lat,
-            'lon': lon,
-            'status': status,
+            'lat': float(row['lat']),
+            'lon': float(row['lon']),
+            'status': str(status),
             'color': color,
-            'vigor': round(float(vigor), 2) if vigor != -999 else None,
-            'ndvi': round(float(val_ndvi), 3),
-            'ndre': round(float(val_ndre), 3),
-            'ndbi': round(float(val_ndbi), 3),
-            'msi': round(float(val_msi), 3)
+            'vigor': vigor_val,
+            'ndvi': round(float(row.get('NDVI', 0)), 3),
+            'ndre': round(float(row.get('NDRE', 0)), 3),
+            'ndbi': round(float(row.get('NDBI', 0)), 3),
+            'msi': round(float(row.get('MSI', 0)), 3)
         })
         
     total_pts = len(points)
-    total_filtered_out = non_veg_count + non_palm_count
-    palm_total = max(1, (healthy_count + stressed_count + sick_count))
+    palm_total = max(1, (healthy_count + stressed_count + sick_count + young_count))
     
     sick_pct = round((sick_count / palm_total) * 100, 1)
     stressed_pct = round((stressed_count / palm_total) * 100, 1)
@@ -194,7 +209,7 @@ def process_gee_polygon(coords, year):
             'area_ha': area_ha,
             'total_points': total_pts,
             'palm_points': palm_total,
-            'filtered_points': total_filtered_out,
+            'filtered_points': filtered_count,
             'healthy_count': healthy_count,
             'healthy_pct': healthy_pct,
             'stressed_count': stressed_count,
@@ -202,69 +217,110 @@ def process_gee_polygon(coords, year):
             'sick_count': sick_count,
             'sick_pct': sick_pct,
             'alert': alert,
-            'alert_class': alert_class
+            'alert_class': alert_class,
+            'ml_timing': ml_timing,
+            'gee_time_sec': gee_time_sec,
+            'model_engine': 'XGBoost 2-Layer (Hierarchical AI)'
         }
     }
 
 def simulate_polygon_analysis(coords):
-    """Simulasi cerdas jika GEE offline."""
+    """Simulasi cerdas menjalankan model ML pada titik sintetis jika GEE offline."""
     lons = [c[0] for c in coords[0]]
     lats = [c[1] for c in coords[0]]
     min_lon, max_lon = min(lons), max(lons)
     min_lat, max_lat = min(lats), max(lats)
     
+    records = []
+    np.random.seed(42)
+    for _ in range(250):
+        records.append({
+            'lon': np.random.uniform(min_lon, max_lon),
+            'lat': np.random.uniform(min_lat, max_lat),
+            'B2': np.random.uniform(0.02, 0.05),
+            'B3': np.random.uniform(0.04, 0.07),
+            'B4': np.random.uniform(0.02, 0.05),
+            'B5': np.random.uniform(0.08, 0.12),
+            'B6': np.random.uniform(0.20, 0.30),
+            'B7': np.random.uniform(0.28, 0.38),
+            'B8': np.random.uniform(0.30, 0.45),
+            'B8A': np.random.uniform(0.32, 0.46),
+            'B11': np.random.uniform(0.15, 0.25),
+            'B12': np.random.uniform(0.08, 0.15),
+            'NDVI': np.random.uniform(0.70, 0.88),
+            'NDRE': np.random.uniform(0.48, 0.65),
+            'NDBI': np.random.uniform(-0.35, -0.18),
+            'MSI': np.random.uniform(0.45, 0.65),
+            'GLCM_Contrast': np.random.uniform(0.6, 1.1),
+            'GLCM_Entropy': np.random.uniform(1.8, 2.3),
+            'GLCM_Variance': np.random.uniform(0.5, 0.9)
+        })
+    df = pd.DataFrame(records)
+    df_pred, ml_timing = predict_pipeline(df, return_timing=True)
+    
     points = []
     sick_count = 0
     stressed_count = 0
     healthy_count = 0
+    filtered_count = 0
     
-    for _ in range(250):
-        lat = np.random.uniform(min_lat, max_lat)
-        lon = np.random.uniform(min_lon, max_lon)
-        rnd = np.random.rand()
-        if rnd < 0.65:
-            status = '🟢 Sawit Sehat Prima'
+    for _, row in df_pred.iterrows():
+        status = row['health_status']
+        vigor = row.get('vigor_score')
+        vigor_val = round(float(vigor), 2) if pd.notnull(vigor) else None
+        
+        if '🔴' in status or 'Sakit' in status:
+            color = '#e74c3c'
+            sick_count += 1
+        elif '🟢' in status or 'Sehat' in status:
             color = '#2ecc71'
-            vigor = np.random.uniform(-0.4, 1.2)
             healthy_count += 1
-        elif rnd < 0.88:
-            status = '🟡 Sawit Stres Ringan'
+        elif '🟡' in status or 'Stres' in status:
             color = '#f1c40f'
-            vigor = np.random.uniform(-1.4, -0.6)
             stressed_count += 1
         else:
-            status = '🔴 SAWIT SAKIT (Stres Berat / Ganoderma)'
-            color = '#e74c3c'
-            vigor = np.random.uniform(-3.5, -1.6)
-            sick_count += 1
+            color = '#94a3b8'
+            filtered_count += 1
             
         points.append({
-            'lat': lat, 'lon': lon, 'status': status, 'color': color,
-            'vigor': round(float(vigor), 2),
-            'ndvi': round(float(0.75 + vigor*0.05), 3),
-            'ndre': round(float(0.50 + vigor*0.04), 3),
-            'msi': round(float(0.60 - vigor*0.04), 3)
+            'lat': float(row['lat']),
+            'lon': float(row['lon']),
+            'status': str(status),
+            'color': color,
+            'vigor': vigor_val,
+            'ndvi': round(float(row.get('NDVI', 0)), 3),
+            'ndre': round(float(row.get('NDRE', 0)), 3),
+            'ndbi': round(float(row.get('NDBI', 0)), 3),
+            'msi': round(float(row.get('MSI', 0)), 3)
         })
         
-    total = len(points)
+    total_pts = len(points)
+    palm_total = max(1, (healthy_count + stressed_count + sick_count))
+    sick_pct = round((sick_count / palm_total) * 100, 1)
+    stressed_pct = round((stressed_count / palm_total) * 100, 1)
+    healthy_pct = round((healthy_count / palm_total) * 100, 1)
+    
     return {
         'points': points,
         'summary': {
-            'area_ha': 45.2,
-            'total_points': total,
-            'palm_points': total,
+            'area_ha': 4.8,
+            'total_points': total_pts,
+            'palm_points': palm_total,
+            'filtered_points': filtered_count,
             'healthy_count': healthy_count,
-            'healthy_pct': round((healthy_count/total)*100, 1),
+            'healthy_pct': healthy_pct,
             'stressed_count': stressed_count,
-            'stressed_pct': round((stressed_count/total)*100, 1),
+            'stressed_pct': stressed_pct,
             'sick_count': sick_count,
-            'sick_pct': round((sick_count/total)*100, 1),
-            'alert': "WASPADA: Kluster Sakit Terdeteksi",
-            'alert_class': "warning"
+            'sick_pct': sick_pct,
+            'alert': "SIMULASI OFFLINE: Data dievaluasi via XGBoost lokal",
+            'alert_class': "warning",
+            'ml_timing': ml_timing,
+            'gee_time_sec': 0.01,
+            'model_engine': 'XGBoost 2-Layer (Simulasi)'
         }
     }
 
 if __name__ == '__main__':
-    port = 5000
-    print(f">> Web GIS Berjalan di: http://127.0.0.1:{port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    print(">> Menjalankan Web GIS Server pada http://localhost:5000 ...")
+    app.run(debug=True, port=5000)

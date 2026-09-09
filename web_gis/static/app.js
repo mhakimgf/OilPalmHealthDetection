@@ -306,8 +306,22 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('barSick').style.width = `${s.sick_pct}%`;
 
         const badge = document.getElementById('badgeAlert');
-        badge.className = `alert-badge ${s.alert_class}`;
-        badge.innerText = s.alert;
+        if (badge) {
+            badge.className = `alert-badge ${s.alert_class}`;
+            badge.innerText = s.alert;
+        }
+
+        // Tampilkan metrik waktu inferensi Machine Learning
+        if (s.ml_timing) {
+            const mlElem = document.getElementById('valMlTime');
+            const geeElem = document.getElementById('valGeeTime');
+            const msPointElem = document.getElementById('valMsPerPoint');
+            
+            if (mlElem) mlElem.innerText = `${s.ml_timing.elapsed_sec}s (${s.ml_timing.elapsed_ms} ms)`;
+            if (geeElem) geeElem.innerText = `${s.gee_time_sec || 0}s`;
+            if (msPointElem) msPointElem.innerText = `${s.ml_timing.ms_per_sample} ms/pohon`;
+            console.log(`>> [ML Benchmark] ${s.model_engine}: ${s.ml_timing.total_samples} points in ${s.ml_timing.elapsed_ms} ms (${s.ml_timing.ms_per_sample} ms/point)`);
+        }
 
         resultsCard.style.display = 'block';
     }

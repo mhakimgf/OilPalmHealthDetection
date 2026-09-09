@@ -107,6 +107,22 @@
                         </div>
                     </div>
 
+                    <!-- Benchmark Kecepatan Model Machine Learning -->
+                    <div class="kpi-grid" style="margin-top: 8px;">
+                        <div class="kpi-item" style="grid-column: span 2; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; padding: 8px 10px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <span class="kpi-label" style="font-size: 11px; margin-bottom: 0;">
+                                    <i class="fa-solid fa-bolt text-warning"></i> Inferensi Model (XGBoost)
+                                </span>
+                                <span id="valMlTime" class="kpi-value" style="font-size: 13px; font-weight: 700; color: #38bdf8;">-</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px; font-size: 10px; color: var(--text-muted);">
+                                <span>Ekstraksi Citra GEE: <b id="valGeeTime" style="color: var(--text-primary);">-</b></span>
+                                <span id="valMsPerPoint">- ms/pohon</span>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="health-breakdown">
                         <div class="health-bar-container">
                             <div id="barHealthy" class="bar-fill healthy" style="width: 60%;"></div>

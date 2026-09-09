@@ -20,6 +20,8 @@ from folium.plugins import HeatMap
 import pandas as pd
 import numpy as np
 
+from predict_point_or_csv import predict_pipeline
+
 sys.stdout.reconfigure(encoding='utf-8')
 
 # Inisialisasi GEE
@@ -109,43 +111,14 @@ def inspect_polygon_health(polygon_ee, nama_blok="Blok_Kebun_Uji", year=2024, ou
         })
     df = pd.DataFrame(records)
     
-    # 5. Klasifikasi Hierarkis Biofisika + Health Status
-    print("[3/4] Menjalankan Pipeline Hierarkis Biofisika + Deteksi Pohon Sakit...")
-    mean_ndre, std_ndre = 0.589, 0.037
-    mean_ndvi, std_ndvi = 0.822, 0.031
-    mean_msi,  std_msi  = 0.548, 0.052
+    # 5. Klasifikasi Menggunakan Pipeline Machine Learning (XGBoost 2-Layer)
+    print("[3/4] Menjalankan Pipeline Machine Learning (XGBoost 2-Layer) + Health Assessment...")
+    df_pred, timing = predict_pipeline(df, return_timing=True)
+    df['status'] = df_pred['health_status']
+    df['vigor_score'] = df_pred['vigor_score']
     
-    z_ndre = (df['NDRE'] - mean_ndre) / std_ndre
-    z_ndvi = (df['NDVI'] - mean_ndvi) / std_ndvi
-    z_msi  = (df['MSI']  - mean_msi)  / std_msi
-    df['vigor_score'] = (0.45 * z_ndre) + (0.35 * z_ndvi) - (0.20 * z_msi)
-    
-    def assign_status(row):
-        v_ndvi = row['NDVI']
-        v_ndre = row['NDRE']
-        v_ndbi = row['NDBI']
-        v_msi  = row['MSI']
-        v_ratio = row['NIR_RED']
-        v_b4   = row['B4']
-        vigor  = row['vigor_score']
-
-        # 1. BUKAN VEGETASI (Jalan Aspal, Atap Bangunan, Semen, Tanah Gundul)
-        if (v_ndvi < 0.48) or (v_ndbi > -0.06) or (v_ratio < 2.8) or (v_b4 > 0.085):
-            return 'Bukan Vegetasi (Jalan / Bangunan / Tanah)'
-
-        # 2. BUKAN KEBUN SAWIT (Bahu Jalan Berumput, Pekarangan Rumah, Semak Liar)
-        if (v_ndbi > -0.15) or (v_ratio < 4.5) or (v_ndvi < 0.65) or (v_b4 > 0.060):
-            return 'Non-Sawit (Bahu Jalan / Pekarangan / Semak)'
-
-        # 3. KEBUN SAWIT TERVERIFIKASI (Health Assessment)
-        if (v_ndre < 0.46 and v_ndvi < 0.72 and v_msi > 0.65) or (vigor < -2.2):
-            return '🔴 SAWIT SAKIT (Target Karantina)'
-        elif v_ndvi >= 0.76 and v_ndre >= 0.52 and v_msi <= 0.65:
-            return '🟢 Sawit Sehat Prima'
-        else:
-            return '🟡 Sawit Stres Ringan (Defisiensi Hara)'
-            
-    df['status'] = df.apply(assign_status, axis=1)
+    print(f"      >> [BENCHMARK ML] Selesai memprediksi {timing['total_samples']:,} titik pohon dalam {timing['elapsed_sec']} detik ({timing['elapsed_ms']} ms)!")
+    print(f"      >> [KECEPATAN ML] {timing['ms_per_sample']} ms per pohon.")
     
     # Ringkasan Statistik
     stats = df['status'].value_counts()
