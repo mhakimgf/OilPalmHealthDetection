@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web GIS — Deteksi Kesehatan Sawit Presisi</title>
+
+    <!-- Google Fonts Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+        rel="stylesheet">
+
+    <!-- Leaflet & Leaflet-Geoman (Modern Drawing Tools) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.css" />
+
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Sidebar Kontrol & Hasil Analisis -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <i class="fa-solid fa-seedling"></i>
+                    <div>
+                        <h2>PALM-GUARD GIS</h2>
+                        <p>Sentinel-2 Hierarchical Health Diagnostic</p>
+                    </div>
+                </div>
+                <div class="gee-badge {% if gee_status %}connected{% else %}offline{% endif %}">
+                    <span class="dot"></span>
+                    {% if gee_status %}GEE Connected{% else %}GEE Offline{% endif %}
+                </div>
+            </div>
+
+            <div class="sidebar-content">
+                <!-- Section 1: Drawing & Action -->
+                <div class="control-card">
+                    <h3><i class="fa-solid fa-draw-polygon"></i> 1. Tentukan Poligon Kebun</h3>
+                    <p class="helper-text">Gambar poligon batas kebun Anda di peta satelit atau gunakan poligon sampel
+                        Rambah Hilir.</p>
+
+                    <div class="btn-group">
+                        <button id="btnDraw" class="btn btn-outline">
+                            <i class="fa-solid fa-pen-nib"></i> Gambar Poligon
+                        </button>
+                        <button id="btnPreset" class="btn btn-secondary">
+                            <i class="fa-solid fa-map-pin"></i> Contoh Kebun
+                        </button>
+                        <button id="btnClear" class="btn btn-danger-outline" title="Hapus Poligon">
+                            <i class="fa-solid fa-trash"></i>
+                        </button>
+                    </div>
+
+                    <div id="polygonStatus" class="polygon-status empty">
+                        <i class="fa-solid fa-circle-info"></i> Belum ada poligon yang dipilih.
+                    </div>
+                </div>
+
+                <!-- Section 2: Parameter & Eksekusi -->
+                <div class="control-card">
+                    <h3><i class="fa-solid fa-sliders"></i> 2. Parameter Analisis</h3>
+                    <div class="form-row">
+                        <label for="selectYear">Tahun Citra Sentinel-2:</label>
+                        <select id="selectYear" class="form-select">
+                            <option value="2024" selected>2024 (Terbaru)</option>
+                            <option value="2023">2023</option>
+                            <option value="2022">2022</option>
+                        </select>
+                    </div>
+
+                    <button id="btnRun" class="btn btn-primary btn-block" disabled>
+                        <i class="fa-solid fa-bolt"></i> Jalankan Analisis 2-Layer
+                    </button>
+                </div>
+
+                <!-- Loading Spinner State -->
+                <div id="loadingBox" class="loading-box" style="display: none;">
+                    <div class="spinner"></div>
+                    <h4>Memproses Citra Satelit di Server Google Earth Engine...</h4>
+                    <p id="loadingStep">Mengunduh band spektral Red Edge, NDVI, dan MSI...</p>
+                </div>
+
+                <!-- Section 3: Hasil Diagnosa & KPI (Hidden Default) -->
+                <div id="resultsCard" class="control-card result-card" style="display: none;">
+                    <div class="result-header">
+                        <h3><i class="fa-solid fa-chart-pie"></i> Diagnosa Kesehatan Blok</h3>
+                        <span id="badgeAlert" class="alert-badge warning">WASPADA</span>
+                    </div>
+
+                    <div class="kpi-grid">
+                        <div class="kpi-item">
+                            <span class="kpi-label">Luas Area</span>
+                            <span id="valArea" class="kpi-value">- Ha</span>
+                        </div>
+                        <div class="kpi-item">
+                            <span class="kpi-label">Titik Pohon</span>
+                            <span id="valPoints" class="kpi-value">-</span>
+                        </div>
+                    </div>
+
+                    <div class="health-breakdown">
+                        <div class="health-bar-container">
+                            <div id="barHealthy" class="bar-fill healthy" style="width: 60%;"></div>
+                            <div id="barStressed" class="bar-fill stressed" style="width: 25%;"></div>
+                            <div id="barSick" class="bar-fill sick" style="width: 15%;"></div>
+                        </div>
+
+                        <div class="stat-rows">
+                            <div class="stat-row">
+                                <span class="indicator healthy"></span>
+                                <span class="stat-name">Sawit Sehat Prima</span>
+                                <span id="valHealthyPct" class="stat-pct">0%</span>
+                            </div>
+                            <div class="stat-row">
+                                <span class="indicator stressed"></span>
+                                <span class="stat-name">Stres Ringan (Defisiensi)</span>
+                                <span id="valStressedPct" class="stat-pct">0%</span>
+                            </div>
+                            <div class="stat-row">
+                                <span class="indicator sick"></span>
+                                <span class="stat-name">SAWIT SAKIT (Kritis)</span>
+                                <span id="valSickPct" class="stat-pct bold text-danger">0%</span>
+                            </div>
+                            <div class="stat-row"
+                                style="opacity: 0.75; font-size: 11px; margin-top: 6px; border-top: 1px dashed var(--border-color); padding-top: 6px;">
+                                <span class="indicator other" style="background: #94a3b8;"></span>
+                                <span class="stat-name">Jalan / Non-Sawit (Disaring)</span>
+                                <span id="valFilteredPoints" class="stat-pct">0 Pkt</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="export-actions">
+                        <button id="btnExportCSV" class="btn btn-success btn-block">
+                            <i class="fa-solid fa-file-csv"></i> Unduh Target GPS Pohon Sakit (.CSV)
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-footer">
+                <small>PRODS Sawit &bull; Model Hierarkis 2-Layer &bull; Sentinel-2</small>
+            </div>
+        </aside>
+
+        <!-- Main Map Container -->
+        <main class="map-wrapper">
+            <div id="map"></div>
+
+            <!-- Floating Map Legend -->
+            <div class="map-legend">
+                <h4>Legenda Kesehatan</h4>
+                <div class="legend-item"><span class="color-box healthy"></span> Sawit Sehat Prima</div>
+                <div class="legend-item"><span class="color-box stressed"></span> Stres Ringan (Pupuk/Air)</div>
+                <div class="legend-item"><span class="color-box sick"></span> SAWIT SAKIT (Target Karantina)</div>
+                <div class="legend-item"><span class="color-box other"></span> Non-Sawit / Jalan Kebun</div>
+                <hr>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="toggleHeatmap" checked>
+                    <span class="slider round"></span>
+                    <span class="toggle-label">🔥 Heatmap Hotspot Sakit</span>
+                </label>
+            </div>
+        </main>
+    </div>
+
+    <!-- Scripts: Leaflet, Geoman, Heatmap, and App.js -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.min.js"></script>
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=2"></script>
+</body>
+
+</html>

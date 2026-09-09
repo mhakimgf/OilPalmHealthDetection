@@ -1,0 +1,18 @@
+{
+  "baseline_flat": {
+    "accuracy": 0.8641844367533772,
+    "macro_f1": 0.737587464892024
+  },
+  "layer_1_veg_nonveg": {
+    "accuracy": 0.9538908116556883,
+    "f1_score": 0.9735341236783083
+  },
+  "layer_2_sawit_non_sawit": {
+    "accuracy": 0.9217237771383731,
+    "f1_score": 0.9528238678910653
+  },
+  "pipeline_cascade": {
+    "accuracy": 0.9106843809311154,
+    "f1_score_sawit": 0.9377238050755099
+  }
+}

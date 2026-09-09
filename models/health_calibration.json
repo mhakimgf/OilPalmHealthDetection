@@ -1,0 +1,30 @@
+{
+  "mean_ndre": 0.5891522935474502,
+  "std_ndre": 0.03688440238185981,
+  "mean_ndvi": 0.8224108379153707,
+  "std_ndvi": 0.030659554677584917,
+  "mean_msi": 0.5477516892460755,
+  "std_msi": 0.05188812088366509,
+  "features": [
+    "B2",
+    "B3",
+    "B4",
+    "B5",
+    "B6",
+    "B7",
+    "B8",
+    "B8A",
+    "B11",
+    "B12",
+    "NDVI",
+    "EVI",
+    "SAVI",
+    "NDBI",
+    "NDRE",
+    "NDWI",
+    "MSI",
+    "GLCM_Contrast",
+    "GLCM_Entropy",
+    "GLCM_Variance"
+  ]
+}
