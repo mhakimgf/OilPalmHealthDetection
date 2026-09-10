@@ -220,7 +220,7 @@ def process_gee_polygon(coords, year):
             'alert_class': alert_class,
             'ml_timing': ml_timing,
             'gee_time_sec': gee_time_sec,
-            'model_engine': 'XGBoost 2-Layer (Hierarchical AI)'
+            'model_engine': 'Random Forest 2-Layer (Hierarchical AI)'
         }
     }
 

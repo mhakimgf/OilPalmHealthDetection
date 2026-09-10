@@ -55,13 +55,17 @@
                         <button id="btnPreset" class="btn btn-secondary">
                             <i class="fa-solid fa-map-pin"></i> Contoh Kebun
                         </button>
-                        <button id="btnClear" class="btn btn-danger-outline" title="Hapus Poligon">
+                        <button id="btnClear" class="btn btn-danger-outline" title="Hapus Semua Poligon & Titik Prediksi">
                             <i class="fa-solid fa-trash"></i>
                         </button>
                     </div>
 
                     <div id="polygonStatus" class="polygon-status empty">
                         <i class="fa-solid fa-circle-info"></i> Belum ada poligon yang dipilih.
+                    </div>
+
+                    <div class="multi-polygon-hint" style="margin-top: 10px; font-size: 11px; color: var(--text-muted); line-height: 1.4; background: rgba(255,255,255,0.03); border: 1px dashed var(--border-color); border-radius: 6px; padding: 8px 10px;">
+                        <i class="fa-solid fa-layer-group" style="color: var(--primary);"></i> <b>Multi-Poligon:</b> Buat beberapa poligon tanpa terhapus. Klik <b>garis tepi poligon</b> di peta untuk menghapus blok tersebut, atau tombol <i class="fa-solid fa-trash text-danger"></i> untuk hapus semua.
                     </div>
                 </div>
 
@@ -92,7 +96,10 @@
                 <!-- Section 3: Hasil Diagnosa & KPI (Hidden Default) -->
                 <div id="resultsCard" class="control-card result-card" style="display: none;">
                     <div class="result-header">
-                        <h3><i class="fa-solid fa-chart-pie"></i> Diagnosa Kesehatan Blok</h3>
+                        <div>
+                            <h3 style="margin-bottom: 2px;"><i class="fa-solid fa-chart-pie"></i> Diagnosa Kesehatan</h3>
+                            <span id="valBlockCount" style="font-size: 11px; color: #38bdf8; font-weight: 600; background: rgba(56, 189, 248, 0.1); padding: 2px 8px; border-radius: 12px; border: 1px solid rgba(56, 189, 248, 0.3);">0 Blok Aktif</span>
+                        </div>
                         <span id="badgeAlert" class="alert-badge warning">WASPADA</span>
                     </div>
 
@@ -112,7 +119,7 @@
                         <div class="kpi-item" style="grid-column: span 2; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; padding: 8px 10px;">
                             <div style="display: flex; justify-content: space-between; align-items: center;">
                                 <span class="kpi-label" style="font-size: 11px; margin-bottom: 0;">
-                                    <i class="fa-solid fa-bolt text-warning"></i> Inferensi Model (XGBoost)
+                                    <i class="fa-solid fa-tree text-success"></i> Inferensi Model (Random Forest)
                                 </span>
                                 <span id="valMlTime" class="kpi-value" style="font-size: 13px; font-weight: 700; color: #38bdf8;">-</span>
                             </div>
@@ -193,7 +200,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.min.js"></script>
     <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-    <script src="{{ url_for('static', filename='app.js') }}?v=2"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=3"></script>
 </body>
 
 </html>

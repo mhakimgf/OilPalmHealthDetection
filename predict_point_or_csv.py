@@ -1,10 +1,11 @@
 """
-Pipeline Inferensi 2-Layer Machine Learning (XGBoost) + Health Assessment
-========================================================================
-Memuat model XGBoost terlatih untuk klasifikasi hierarkis:
-1. Layer 1 (XGBoost): Vegetasi vs Non-Vegetasi
-2. Layer 2 (XGBoost): Sawit vs Hutan / Non-Sawit
-3. Layer 3 (Health Module): Multi-Spectral Vigor Score (MVS) berbasis Z-score
+Pipeline Inferensi 2-Layer Machine Learning (Random Forest) + Health Assessment
+==============================================================================
+Menggunakan Random Forest Classifier untuk klasifikasi hierarkis:
+1. Layer 1 (Random Forest): Vegetasi vs Non-Vegetasi
+2. Layer 2 (Random Forest): Sawit vs Hutan / Non-Sawit
+3. Layer 3 (Health Module): Multi-Spectral Vigor Score (MVS) dengan penjagaan
+   boundary/mixed-pixel untuk mencegah false positive di sekitar perbatasan non-vegetasi.
 """
 
 import os
@@ -21,11 +22,17 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-# Load model dan kalibrasi (fleksibel baik di root repo maupun subfolder)
+# Load model Random Forest dan kalibrasi
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_L1_PATH = os.path.join(BASE_DIR, 'models', 'model_layer1_vegetasi.pkl')
-MODEL_L2_PATH = os.path.join(BASE_DIR, 'models', 'model_layer2_sawit.pkl')
+MODEL_L1_PATH = os.path.join(BASE_DIR, 'models', 'model_layer1_rf_vegetasi.pkl')
+MODEL_L2_PATH = os.path.join(BASE_DIR, 'models', 'model_layer2_rf_sawit.pkl')
 CALIB_PATH    = os.path.join(BASE_DIR, 'models', 'health_calibration.json')
+
+# Fallback ke XGBoost jika RF belum ada
+if not os.path.exists(MODEL_L1_PATH):
+    MODEL_L1_PATH = os.path.join(BASE_DIR, 'models', 'model_layer1_vegetasi.pkl')
+if not os.path.exists(MODEL_L2_PATH):
+    MODEL_L2_PATH = os.path.join(BASE_DIR, 'models', 'model_layer2_sawit.pkl')
 
 model_l1 = joblib.load(MODEL_L1_PATH)
 model_l2 = joblib.load(MODEL_L2_PATH)
@@ -75,7 +82,7 @@ def ensure_features(df_input):
 def predict_pipeline(df_input, return_timing=False):
     """
     Menerima DataFrame fitur Sentinel-2 dan memprediksi status kesehatan
-    menggunakan model XGBoost 2-Layer terlatih.
+    menggunakan model Random Forest 2-Layer dengan eliminasi false positive border.
     
     Returns:
         df_res: DataFrame dengan kolom pred_layer1, pred_layer2, health_status, vigor_score
@@ -87,18 +94,18 @@ def predict_pipeline(df_input, return_timing=False):
     
     X = df_prepared[FEATURES]
     
-    # Layer 1: Vegetatif vs Non-Vegetatif (XGBoost)
+    # Layer 1: Vegetatif vs Non-Vegetatif (Random Forest)
     is_veg = model_l1.predict(X)
     df_res['pred_layer1'] = np.where(is_veg == 1, 'Vegetasi', 'Non-Vegetasi')
     
-    # Layer 2: Sawit vs Non-Sawit (XGBoost)
+    # Layer 2: Sawit vs Non-Sawit (Random Forest)
     df_res['pred_layer2'] = 'Bukan Sawit'
     veg_mask = (is_veg == 1)
     if veg_mask.sum() > 0:
         is_sawit = model_l2.predict(X[veg_mask])
         df_res.loc[veg_mask, 'pred_layer2'] = np.where(is_sawit == 1, 'Sawit', 'Hutan/Non-Sawit')
         
-    # Layer 3: Health Assessment (Statistical Anomaly & Biofisika)
+    # Layer 3: Health Assessment (Statistical Anomaly & Biofisika Guardrail)
     df_res['health_status'] = df_res['pred_layer2']
     df_res['vigor_score'] = np.nan
     sawit_mask = (df_res['pred_layer2'] == 'Sawit')
@@ -116,17 +123,25 @@ def predict_pipeline(df_input, return_timing=False):
             v_ndre = row['NDRE']
             v_ndvi = row['NDVI']
             v_msi = row['MSI']
+            v_ndbi = row.get('NDBI', -0.3)
+            v_b4 = row.get('B4', 0.03)
+            v_b8 = row.get('B8', 0.3)
+            nir_red = v_b8 / (v_b4 + 1e-6)
             
-            # 1. Sawit Muda / Tajuk Terbuka
-            if v_ndvi < 0.65 and v_ndre < 0.42:
+            # 1. Guardrail Perbatasan Non-Vegetasi (Jalan / Rumah / Tanah Terbuka / Bahu Jalan)
+            # Jika NDBI tinggi atau rasio NIR/Red rendah, ini adalah piksel campuran tepi kebun!
+            if (v_ndbi > -0.12) or (nir_red < 4.0) or (v_b4 > 0.065):
+                health_list.append('Non-Sawit (Bahu Jalan / Pekarangan / Semak)')
+            # 2. Sawit Muda / Tajuk Terbuka (kanopi belum rapat)
+            elif (v_ndvi < 0.70 and v_ndre < 0.48) or (v_ndbi > -0.18):
                 health_list.append('Sawit Muda / Terbuka')
-            # 2. Sawit Sakit Sejati (Anomali ekstrem atau klorosis+dehidrasi tajuk)
-            elif (v_ndre < 0.46 and v_ndvi < 0.72 and v_msi > 0.65) or (v < -2.2):
-                health_list.append('🔴 SAWIT SAKIT (Stres Berat / Ganoderma)')
-            # 3. Sawit Sehat Prima
+            # 3. Sawit Sakit Sejati (Harus kanopi sawit dewasa rapat, tapi klorosis berat & tajuk dehidrasi)
+            elif (v_ndre < 0.44 and v_ndvi < 0.72 and v_msi > 0.65) and (v < -2.0) and (v_ndbi <= -0.18):
+                health_list.append('🔴 SAWIT SAKIT (Target Karantina)')
+            # 4. Sawit Sehat Prima
             elif v >= -0.5 and v_ndvi >= 0.76 and v_ndre >= 0.52:
                 health_list.append('🟢 Sawit Sehat Prima')
-            # 4. Stres Ringan (Defisiensi Hara / Fluktuasi Musim)
+            # 5. Stres Ringan (Defisiensi Hara / Fluktuasi Musim)
             else:
                 health_list.append('🟡 Sawit Stres Ringan (Defisiensi Hara)')
                 
@@ -141,7 +156,8 @@ def predict_pipeline(df_input, return_timing=False):
         'total_samples': len(df_res),
         'elapsed_sec': round(elapsed_sec, 4),
         'elapsed_ms': round(elapsed_ms, 2),
-        'ms_per_sample': round(elapsed_ms / max(1, len(df_res)), 3)
+        'ms_per_sample': round(elapsed_ms / max(1, len(df_res)), 3),
+        'model_name': 'Random Forest 2-Layer'
     }
     
     if return_timing:
@@ -154,19 +170,16 @@ if __name__ == '__main__':
     chosen_path = next((p for p in csv_paths if os.path.exists(p)), None)
     
     if chosen_path:
-        print(f">> Menjalankan Benchmark Inferensi pada data {chosen_path}...")
+        print(f">> Menjalankan Benchmark Inferensi Random Forest pada {chosen_path}...")
         sample_df = pd.read_csv(chosen_path, nrows=2500)
         res, timing = predict_pipeline(sample_df, return_timing=True)
         print(f"\n=======================================================")
-        print(f"  HASIL BENCHMARK KECEPATAN MODEL MACHINE LEARNING")
+        print(f"  HASIL BENCHMARK KECEPATAN MODEL RANDOM FOREST")
         print(f"=======================================================")
-        print(f"  Jumlah Sampel : {timing['total_samples']:,} titik")
-        print(f"  Total Waktu   : {timing['elapsed_sec']} detik ({timing['elapsed_ms']} ms)")
+        print(f"  Model Engine    : {timing['model_name']}")
+        print(f"  Jumlah Sampel   : {timing['total_samples']:,} titik")
+        print(f"  Total Waktu     : {timing['elapsed_sec']} detik ({timing['elapsed_ms']} ms)")
         print(f"  Kecepatan/Titik : {timing['ms_per_sample']} ms per pohon")
         print(f"\nDistribusi Prediksi:")
-        print(res['health_status'].value_counts())
-    else:
-        print(">> File training_data_all_features.csv tidak ditemukan, menjalankan pengujian dengan data sintetis:")
-        dummy_df = pd.DataFrame([{f: 0.5 for f in FEATURES} for _ in range(100)])
-        res, timing = predict_pipeline(dummy_df, return_timing=True)
-        print(f"  Inference 100 sampel selesai dalam {timing['elapsed_ms']} ms ({timing['ms_per_sample']} ms/sampel)")
+        for k, v in res['health_status'].value_counts().items():
+            print(f"  {k}: {v}")

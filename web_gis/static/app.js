@@ -1,4 +1,4 @@
-// Interactive Web GIS Application Logic
+// Interactive Web GIS Application Logic (Multi-Polygon & Layer Management)
 document.addEventListener('DOMContentLoaded', () => {
     // 1. Inisialisasi Map Leaflet di Rambah Hilir, Riau
     const defaultCenter = [0.9895, 100.3995];
@@ -55,7 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
         map.invalidateSize();
     }, 200);
 
-    // 3. Geoman Drawing Controls (Polygon)
+    // 3. Geoman Drawing Controls (Polygon & Rectangle)
     map.pm.addControls({
         position: 'topleft',
         drawMarker: false,
@@ -69,12 +69,14 @@ document.addEventListener('DOMContentLoaded', () => {
         removalMode: true
     });
 
-    // Layer Groups
-    let drawnPolygonLayer = null;
-    let currentPolygonCoords = null;
-    const pointsLayerGroup = L.layerGroup().addTo(map);
-    let heatmapLayer = null;
-    let lastResultData = null;
+    // ==========================================
+    // Multi-Polygon State Management
+    // ==========================================
+    let pendingPolygonLayer = null;       // Poligon yang baru digambar/dipilih (menunggu 'btnRun')
+    let currentPolygonCoords = null;      // Koordinat GeoJSON poligon pending
+    let blockIdCounter = 0;              // Counter penomoran blok (Blok #1, Blok #2, ...)
+    let analyzedBlocks = [];             // Array of { id, polygonLayer, pointsGroup, data, sickPoints }
+    let heatmapLayer = null;             // Layer Heatmap gabungan semua blok aktif
 
     // UI Elements
     const btnDraw = document.getElementById('btnDraw');
@@ -88,26 +90,57 @@ document.addEventListener('DOMContentLoaded', () => {
     const resultsCard = document.getElementById('resultsCard');
     const btnExportCSV = document.getElementById('btnExportCSV');
     const toggleHeatmap = document.getElementById('toggleHeatmap');
+    const valBlockCount = document.getElementById('valBlockCount');
 
-    // Handle Geoman Draw Event
+    // Handle Geoman Draw Event: Membuat poligon pending baru
     map.on('pm:create', (e) => {
-        if (drawnPolygonLayer) {
-            map.removeLayer(drawnPolygonLayer);
+        // Jika ada poligon pending sebelumnya yang belum dianalisis, hapus yang pending saja
+        if (pendingPolygonLayer) {
+            map.removeLayer(pendingPolygonLayer);
         }
-        drawnPolygonLayer = e.layer;
-        extractCoordsFromLayer(drawnPolygonLayer);
+        pendingPolygonLayer = e.layer;
+        
+        // Beri style garis putus-putus oranye untuk menandakan poligon sedang pending
+        pendingPolygonLayer.setStyle({
+            color: '#f59e0b',
+            weight: 3,
+            dashArray: '6, 6',
+            fillColor: '#f59e0b',
+            fillOpacity: 0.15
+        });
+
+        extractCoordsFromLayer(pendingPolygonLayer);
+    });
+
+    // Handle Geoman Removal Event: Sinkronisasi jika dihapus via tool Geoman
+    map.on('pm:remove', (e) => {
+        const removedLayer = e.layer;
+        if (removedLayer === pendingPolygonLayer) {
+            pendingPolygonLayer = null;
+            currentPolygonCoords = null;
+            btnRun.disabled = true;
+            polygonStatus.className = 'polygon-status empty';
+            polygonStatus.innerHTML = '<i class="fa-solid fa-circle-info"></i> Poligon pending dibatalkan.';
+            return;
+        }
+
+        const match = analyzedBlocks.find(b => b.polygonLayer === removedLayer);
+        if (match) {
+            deleteAnalyzedBlock(match.id, false); // false = jangan panggil map.removeLayer lagi karena Geoman sudah menghapusnya
+        }
     });
 
     function extractCoordsFromLayer(layer) {
         const geojson = layer.toGeoJSON();
         currentPolygonCoords = geojson.geometry.coordinates;
 
+        const activeCount = analyzedBlocks.length;
         polygonStatus.className = 'polygon-status ready';
-        polygonStatus.innerHTML = `<i class="fa-solid fa-circle-check"></i> Poligon Siap (${currentPolygonCoords[0].length} titik sudut)`;
+        polygonStatus.innerHTML = `<i class="fa-solid fa-circle-check text-warning"></i> <b>Poligon Baru Siap</b> (${currentPolygonCoords[0].length} sudut).<br><small style="color:var(--text-muted);">${activeCount > 0 ? activeCount + ' blok lain tetap aktif. ' : ''}Klik <b>Jalankan Analisis</b> untuk memproses blok ini.</small>`;
         btnRun.disabled = false;
     }
 
-    // Button: Gambar Poligon
+    // Button: Aktifkan Mode Gambar Poligon
     btnDraw.addEventListener('click', () => {
         map.pm.enableDraw('Polygon', {
             snappable: true,
@@ -117,8 +150,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Button: Contoh Poligon Kebun (Preset Rambah Hilir)
     btnPreset.addEventListener('click', () => {
-        if (drawnPolygonLayer) {
-            map.removeLayer(drawnPolygonLayer);
+        // Hapus pending sebelumnya jika ada
+        if (pendingPolygonLayer) {
+            map.removeLayer(pendingPolygonLayer);
         }
 
         // Koordinat poligon contoh kebun sawit dewasa Rambah Hilir
@@ -130,58 +164,62 @@ document.addEventListener('DOMContentLoaded', () => {
             [100.39848, 0.98849]
         ];
 
-        // Format GeoJSON coordinates: [[[lon, lat], ...]]
         currentPolygonCoords = [presetCoords];
-
-        // Convert to Leaflet latlngs: [[lat, lon], ...]
         const latlngs = presetCoords.map(c => [c[1], c[0]]);
 
-        drawnPolygonLayer = L.polygon(latlngs, {
-            color: '#3b82f6',
+        pendingPolygonLayer = L.polygon(latlngs, {
+            color: '#f59e0b',
             weight: 3,
-            fillColor: '#3b82f6',
-            fillOpacity: 0.2
+            dashArray: '6, 6',
+            fillColor: '#f59e0b',
+            fillOpacity: 0.15
         }).addTo(map);
 
-        map.fitBounds(drawnPolygonLayer.getBounds(), { padding: [40, 40] });
+        map.fitBounds(pendingPolygonLayer.getBounds(), { padding: [40, 40] });
 
+        const activeCount = analyzedBlocks.length;
         polygonStatus.className = 'polygon-status ready';
-        polygonStatus.innerHTML = `<i class="fa-solid fa-circle-check"></i> Contoh Kebun Sawit Terpilih (200m x 240m)`;
+        polygonStatus.innerHTML = `<i class="fa-solid fa-circle-check text-warning"></i> <b>Contoh Kebun Terpilih</b> (200m x 240m).<br><small style="color:var(--text-muted);">${activeCount > 0 ? activeCount + ' blok lain tetap aktif. ' : ''}Klik <b>Jalankan Analisis</b> untuk memproses blok ini.</small>`;
         btnRun.disabled = false;
     });
 
-    // Button: Hapus Poligon
+    // Button: Hapus SEMUA Poligon dan Hasil Prediksi (Tombol Tempat Sampah)
     btnClear.addEventListener('click', () => {
-        if (drawnPolygonLayer) {
-            map.removeLayer(drawnPolygonLayer);
-            drawnPolygonLayer = null;
+        // 1. Hapus pending polygon jika ada
+        if (pendingPolygonLayer) {
+            map.removeLayer(pendingPolygonLayer);
+            pendingPolygonLayer = null;
         }
         currentPolygonCoords = null;
-        pointsLayerGroup.clearLayers();
+
+        // 2. Hapus semua analyzed blocks dari peta
+        analyzedBlocks.forEach(block => {
+            if (block.polygonLayer) map.removeLayer(block.polygonLayer);
+            if (block.pointsGroup) map.removeLayer(block.pointsGroup);
+        });
+        analyzedBlocks = [];
+
+        // 3. Hapus Heatmap
         if (heatmapLayer) {
             map.removeLayer(heatmapLayer);
             heatmapLayer = null;
         }
+
+        // 4. Reset UI Sidebar
         polygonStatus.className = 'polygon-status empty';
-        polygonStatus.innerHTML = `<i class="fa-solid fa-circle-info"></i> Belum ada poligon yang dipilih.`;
+        polygonStatus.innerHTML = `<i class="fa-solid fa-circle-info"></i> Seluruh poligon dan hasil prediksi telah dihapus.`;
         btnRun.disabled = true;
         resultsCard.style.display = 'none';
-        lastResultData = null;
+        if (valBlockCount) valBlockCount.innerText = '0 Blok Aktif';
     });
 
-    // Button: Jalankan Analisis
+    // Button: Jalankan Analisis untuk Poligon Pending
     btnRun.addEventListener('click', async () => {
-        if (!currentPolygonCoords) return;
+        if (!currentPolygonCoords || !pendingPolygonLayer) return;
 
         // UI Loading State
         btnRun.disabled = true;
         loadingBox.style.display = 'flex';
-        resultsCard.style.display = 'none';
-        pointsLayerGroup.clearLayers();
-        if (heatmapLayer) {
-            map.removeLayer(heatmapLayer);
-            heatmapLayer = null;
-        }
 
         const year = selectYear.value;
 
@@ -206,13 +244,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const res = await response.json();
             loadingBox.style.display = 'none';
-            btnRun.disabled = false;
 
             if (res.success && res.data) {
-                lastResultData = res.data;
-                renderResultsOnMap(res.data);
-                renderResultsInSidebar(res.data);
+                // Beri ID unik untuk blok baru
+                blockIdCounter++;
+                const newBlockId = blockIdCounter;
+                
+                // Konversi poligon pending menjadi poligon teranalisis permanen
+                const analyzedPoly = pendingPolygonLayer;
+                pendingPolygonLayer = null;
+                currentPolygonCoords = null;
+
+                // Daftarkan blok dan render titik-titiknya
+                registerAnalyzedBlock(newBlockId, analyzedPoly, res.data);
             } else {
+                btnRun.disabled = false;
                 alert('Gagal memproses poligon: ' + (res.error || 'Terjadi kesalahan'));
             }
         } catch (err) {
@@ -222,17 +268,30 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Render Point Markers & Heatmap
-    function renderResultsOnMap(data) {
-        pointsLayerGroup.clearLayers();
-        const sickPoints = [];
+    // Pendaftaran Blok Hasil Analisis & Pembuatan Layer Titik
+    function registerAnalyzedBlock(blockId, polyLayer, data) {
+        // Style permanen untuk poligon teranalisis (biru laut dengan kursor interaktif)
+        polyLayer.setStyle({
+            color: '#38bdf8',
+            weight: 3.5,
+            dashArray: null,
+            fillColor: '#38bdf8',
+            fillOpacity: 0.1
+        });
+
+        // Layer group tersendiri untuk titik-titik di blok ini
+        const blockPointsGroup = L.layerGroup().addTo(map);
+        const blockSickPoints = [];
 
         data.points.forEach(pt => {
             const isSick = pt.status.includes('SAWIT SAKIT');
             const isFiltered = pt.status.includes('Bukan') || pt.status.includes('Non-Sawit');
 
             const popupHtml = `
-                <div style="font-size: 12px; line-height: 1.5; min-width: 170px;">
+                <div style="font-size: 12px; line-height: 1.5; min-width: 175px;">
+                    <div style="font-size: 11px; color: #64748b; font-weight: 600; margin-bottom: 2px;">
+                        <i class="fa-solid fa-draw-polygon"></i> Blok #${blockId}
+                    </div>
                     <b style="color: ${pt.color}; font-size: 13px;">${pt.status}</b><br>
                     <hr style="margin: 4px 0; border: 0; border-top: 1px solid #ccc;">
                     ${pt.vigor !== null ? `<b>Vigor Score:</b> ${pt.vigor}<br>` : ''}
@@ -252,17 +311,123 @@ document.addEventListener('DOMContentLoaded', () => {
                 weight: isSick ? 2.5 : (isFiltered ? 0.5 : 1)
             }).bindPopup(popupHtml);
 
-            pointsLayerGroup.addLayer(marker);
+            // Hentikan bubbling klik agar tidak memicu penghapusan poligon
+            marker.on('click', (e) => {
+                L.DomEvent.stopPropagation(e);
+            });
 
-            // HANYA titik SAWIT SAKIT sejati yang masuk ke dalam heatmap!
+            blockPointsGroup.addLayer(marker);
+
             if (isSick) {
-                sickPoints.push([pt.lat, pt.lon, 1.0]);
+                blockSickPoints.push([pt.lat, pt.lon, 1.0]);
             }
         });
 
-        // HeatMap Kluster Penyakit
-        if (sickPoints.length > 0) {
-            heatmapLayer = L.heatLayer(sickPoints, {
+        // Tooltip pada garis poligon
+        polyLayer.bindTooltip(`
+            <div style="font-size: 12px; line-height: 1.4;">
+                <b style="color: #38bdf8;">Blok #${blockId}</b> (${data.summary.area_ha} Ha &bull; ${data.summary.palm_points} Pohon)<br>
+                <span style="color: #ef4444; font-weight: 600;">
+                    <i class="fa-solid fa-trash"></i> Klik garis poligon untuk hapus blok ini
+                </span>
+            </div>
+        `, { sticky: true });
+
+        // Efek Hover Garis Poligon: Berubah merah dan menebal agar pengguna tahu bisa diklik untuk dihapus
+        polyLayer.on('mouseover', () => {
+            polyLayer.setStyle({
+                color: '#ef4444',
+                weight: 5,
+                fillOpacity: 0.2
+            });
+        });
+
+        polyLayer.on('mouseout', () => {
+            polyLayer.setStyle({
+                color: '#38bdf8',
+                weight: 3.5,
+                fillOpacity: 0.1
+            });
+        });
+
+        // Event Klik Garis Poligon: Hapus poligon tersebut beserta titik prediksinya
+        polyLayer.on('click', (e) => {
+            L.DomEvent.stopPropagation(e);
+            const msg = `Hapus Poligon Blok #${blockId} (${data.summary.area_ha} Ha) beserta ${data.summary.palm_points} titik prediksinya?`;
+            if (confirm(msg)) {
+                deleteAnalyzedBlock(blockId, true);
+            }
+        });
+
+        // Simpan ke daftar analyzedBlocks
+        analyzedBlocks.push({
+            id: blockId,
+            polygonLayer: polyLayer,
+            pointsGroup: blockPointsGroup,
+            data: data,
+            sickPoints: blockSickPoints
+        });
+
+        // Refresh Heatmap & Dashboard Sidebar
+        refreshCombinedHeatmap();
+        refreshSidebarDashboard();
+
+        polygonStatus.className = 'polygon-status ready';
+        polygonStatus.innerHTML = `<i class="fa-solid fa-circle-check text-success"></i> <b>Blok #${blockId} Selesai.</b> Total <b>${analyzedBlocks.length} blok aktif</b> di peta.<br><small style="color:var(--text-muted);">Gambar poligon lain untuk menambah blok tanpa menghapus hasil ini.</small>`;
+    }
+
+    // Fungsi Hapus Blok Tunggal (Dipanggil saat garis poligon diklik)
+    function deleteAnalyzedBlock(blockId, removePolygonFromMap = true) {
+        const idx = analyzedBlocks.findIndex(b => b.id === blockId);
+        if (idx === -1) return;
+
+        const block = analyzedBlocks[idx];
+
+        // Hapus elemen peta
+        if (removePolygonFromMap && block.polygonLayer) {
+            map.removeLayer(block.polygonLayer);
+        }
+        if (block.pointsGroup) {
+            map.removeLayer(block.pointsGroup);
+        }
+
+        // Hapus dari state
+        analyzedBlocks.splice(idx, 1);
+
+        // Refresh Heatmap gabungan & KPI Sidebar
+        refreshCombinedHeatmap();
+        refreshSidebarDashboard();
+
+        // Update status teks
+        if (analyzedBlocks.length === 0) {
+            polygonStatus.className = 'polygon-status empty';
+            polygonStatus.innerHTML = `<i class="fa-solid fa-circle-info"></i> Blok #${blockId} telah dihapus. Belum ada poligon aktif.`;
+            resultsCard.style.display = 'none';
+            if (valBlockCount) valBlockCount.innerText = '0 Blok Aktif';
+            btnRun.disabled = true;
+        } else {
+            polygonStatus.className = 'polygon-status ready';
+            polygonStatus.innerHTML = `<i class="fa-solid fa-circle-check text-success"></i> Blok #${blockId} dihapus. Tersisa <b>${analyzedBlocks.length} blok aktif</b> di peta.`;
+        }
+    }
+
+    // Expose ke window agar bisa dipanggil jika diperlukan
+    window.deleteAnalyzedBlock = deleteAnalyzedBlock;
+
+    // Refresh Heatmap Gabungan dari SEMUA Blok Aktif
+    function refreshCombinedHeatmap() {
+        if (heatmapLayer) {
+            map.removeLayer(heatmapLayer);
+            heatmapLayer = null;
+        }
+
+        const allSickPoints = [];
+        analyzedBlocks.forEach(b => {
+            b.sickPoints.forEach(pt => allSickPoints.push(pt));
+        });
+
+        if (allSickPoints.length > 0) {
+            heatmapLayer = L.heatLayer(allSickPoints, {
                 radius: 22,
                 blur: 15,
                 maxZoom: 17,
@@ -285,66 +450,125 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Render Sidebar KPI Dashboard
-    function renderResultsInSidebar(data) {
-        const s = data.summary;
+    // Render / Refresh Kumulatif KPI Dashboard di Sidebar
+    function refreshSidebarDashboard() {
+        if (analyzedBlocks.length === 0) {
+            resultsCard.style.display = 'none';
+            if (valBlockCount) valBlockCount.innerText = '0 Blok Aktif';
+            return;
+        }
 
-        document.getElementById('valArea').innerText = `${s.area_ha} Ha`;
-        document.getElementById('valPoints').innerText = `${s.palm_points} Pkt`;
+        let totalArea = 0;
+        let totalPoints = 0;
+        let totalHealthy = 0;
+        let totalStressed = 0;
+        let totalSick = 0;
+        let totalFiltered = 0;
+        let totalMlMs = 0;
+        let totalGeeSec = 0;
 
-        document.getElementById('valHealthyPct').innerText = `${s.healthy_pct}% (${s.healthy_count})`;
-        document.getElementById('valStressedPct').innerText = `${s.stressed_pct}% (${s.stressed_count})`;
-        document.getElementById('valSickPct').innerText = `${s.sick_pct}% (${s.sick_count})`;
-        
+        analyzedBlocks.forEach(b => {
+            const s = b.data.summary;
+            totalArea += (s.area_ha || 0);
+            totalPoints += (s.palm_points || 0);
+            totalHealthy += (s.healthy_count || 0);
+            totalStressed += (s.stressed_count || 0);
+            totalSick += (s.sick_count || 0);
+            totalFiltered += (s.filtered_points || 0);
+            if (s.ml_timing) totalMlMs += s.ml_timing.elapsed_ms;
+            if (s.gee_time_sec) totalGeeSec += s.gee_time_sec;
+        });
+
+        const healthyPct = totalPoints > 0 ? ((totalHealthy / totalPoints) * 100).toFixed(1) : 0;
+        const stressedPct = totalPoints > 0 ? ((totalStressed / totalPoints) * 100).toFixed(1) : 0;
+        const sickPct = totalPoints > 0 ? ((totalSick / totalPoints) * 100).toFixed(1) : 0;
+
+        if (valBlockCount) {
+            valBlockCount.innerText = `${analyzedBlocks.length} Blok Aktif`;
+        }
+
+        document.getElementById('valArea').innerText = `${totalArea.toFixed(2)} Ha`;
+        document.getElementById('valPoints').innerText = `${totalPoints} Pkt`;
+
+        document.getElementById('valHealthyPct').innerText = `${healthyPct}% (${totalHealthy})`;
+        document.getElementById('valStressedPct').innerText = `${stressedPct}% (${totalStressed})`;
+        document.getElementById('valSickPct').innerText = `${sickPct}% (${totalSick})`;
+
         const filteredElem = document.getElementById('valFilteredPoints');
         if (filteredElem) {
-            filteredElem.innerText = `${s.filtered_points || 0} Pkt`;
+            filteredElem.innerText = `${totalFiltered} Pkt`;
         }
 
-        document.getElementById('barHealthy').style.width = `${s.healthy_pct}%`;
-        document.getElementById('barStressed').style.width = `${s.stressed_pct}%`;
-        document.getElementById('barSick').style.width = `${s.sick_pct}%`;
+        document.getElementById('barHealthy').style.width = `${healthyPct}%`;
+        document.getElementById('barStressed').style.width = `${stressedPct}%`;
+        document.getElementById('barSick').style.width = `${sickPct}%`;
 
+        // Alert Status Kumulatif
         const badge = document.getElementById('badgeAlert');
         if (badge) {
-            badge.className = `alert-badge ${s.alert_class}`;
-            badge.innerText = s.alert;
+            if (parseFloat(sickPct) > 15) {
+                badge.className = 'alert-badge danger';
+                badge.innerText = 'BAHAYA EPIDEMI';
+            } else if (parseFloat(sickPct) > 0) {
+                badge.className = 'alert-badge warning';
+                badge.innerText = 'WASPADA KLUSTER';
+            } else if (parseFloat(stressedPct) > 20) {
+                badge.className = 'alert-badge warning';
+                badge.innerText = 'PERLU PEMUPUKAN';
+            } else {
+                badge.className = 'alert-badge optimal';
+                badge.innerText = 'KEBUN OPTIMAL';
+            }
         }
 
-        // Tampilkan metrik waktu inferensi Machine Learning
-        if (s.ml_timing) {
+        // Tampilkan metrik kecepatan inferensi ML dari blok terbaru
+        const latestBlock = analyzedBlocks[analyzedBlocks.length - 1];
+        if (latestBlock && latestBlock.data.summary.ml_timing) {
+            const s = latestBlock.data.summary;
             const mlElem = document.getElementById('valMlTime');
             const geeElem = document.getElementById('valGeeTime');
             const msPointElem = document.getElementById('valMsPerPoint');
-            
+
             if (mlElem) mlElem.innerText = `${s.ml_timing.elapsed_sec}s (${s.ml_timing.elapsed_ms} ms)`;
             if (geeElem) geeElem.innerText = `${s.gee_time_sec || 0}s`;
             if (msPointElem) msPointElem.innerText = `${s.ml_timing.ms_per_sample} ms/pohon`;
-            console.log(`>> [ML Benchmark] ${s.model_engine}: ${s.ml_timing.total_samples} points in ${s.ml_timing.elapsed_ms} ms (${s.ml_timing.ms_per_sample} ms/point)`);
         }
 
         resultsCard.style.display = 'block';
     }
 
-    // Export CSV Download
+    // Export CSV Download untuk SEMUA Blok Aktif
     btnExportCSV.addEventListener('click', () => {
-        if (!lastResultData) return;
-
-        const sickPoints = lastResultData.points.filter(p => p.status.includes('SAWIT SAKIT'));
-        if (sickPoints.length === 0) {
-            alert('Tidak ada pohon sakit yang terdeteksi di blok ini.');
+        if (analyzedBlocks.length === 0) {
+            alert('Tidak ada blok kebun aktif.');
             return;
         }
 
-        let csvContent = "data:text/csv;charset=utf-8,Latitude,Longitude,Vigor_Score,NDRE,NDVI,MSI,Status\n";
-        sickPoints.forEach(p => {
-            csvContent += `${p.lat},${p.lon},${p.vigor},${p.ndre},${p.ndvi},${p.msi},${p.status}\n`;
+        const allSickPoints = [];
+        analyzedBlocks.forEach(b => {
+            const sicks = b.data.points.filter(p => p.status.includes('SAWIT SAKIT'));
+            sicks.forEach(p => {
+                allSickPoints.push({
+                    blockId: b.id,
+                    ...p
+                });
+            });
+        });
+
+        if (allSickPoints.length === 0) {
+            alert('Tidak ada pohon sakit yang terdeteksi di seluruh blok aktif.');
+            return;
+        }
+
+        let csvContent = "data:text/csv;charset=utf-8,Blok_ID,Latitude,Longitude,Vigor_Score,NDRE,NDVI,MSI,Status\n";
+        allSickPoints.forEach(p => {
+            csvContent += `Blok #${p.blockId},${p.lat},${p.lon},${p.vigor},${p.ndre},${p.ndvi},${p.msi},"${p.status}"\n`;
         });
 
         const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
         link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `target_gps_sawit_sakit_${Date.now()}.csv`);
+        link.setAttribute("download", `target_gps_sawit_sakit_${analyzedBlocks.length}blok_${Date.now()}.csv`);
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
