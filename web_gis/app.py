@@ -19,11 +19,12 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-# Import module inferensi machine learning
+# Import module inferensi machine learning (3-Layer RF + CloudScore+ iForest)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+import predict_point_or_csv
 from predict_point_or_csv import predict_pipeline, FEATURES
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
@@ -82,10 +83,23 @@ def process_gee_polygon(coords, year):
     end_date   = f"{year}-12-31"
     
     t_gee_0 = time.time()
-    s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
+    # Dual-Stage Cloud & Shadow Masking: QA60 Bitmask + Google CloudScore+ (cs >= 0.60)
+    cs_plus = ee.ImageCollection('GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED')
+    s2_col = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
         .filterBounds(aoi) \
         .filterDate(start_date, end_date) \
-        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 45)) \
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 50))
+        
+    def mask_clouds_and_shadows(img):
+        # QA60 bitmask: bit 10 (opaque clouds), bit 11 (cirrus)
+        qa = img.select('QA60')
+        qa_mask = qa.bitwiseAnd(1 << 10).eq(0).And(qa.bitwiseAnd(1 << 11).eq(0))
+        # CloudScore+ band 'cs' (Clear Sky Score: 0.0 - 1.0, threshold >= 0.60 eliminates clouds & cloud shadows)
+        cs_mask = img.select('cs').gte(0.60)
+        return img.updateMask(qa_mask.And(cs_mask))
+
+    s2 = s2_col.linkCollection(cs_plus, ['cs']) \
+        .map(mask_clouds_and_shadows) \
         .median() \
         .divide(10000.0) \
         .clip(aoi)
@@ -142,7 +156,7 @@ def process_gee_polygon(coords, year):
             }
         }
         
-    # Jalankan Prediksi dengan Model Machine Learning (XGBoost)
+    # Jalankan Prediksi dengan Model Machine Learning (3-Layer Pipeline)
     df_pred, ml_timing = predict_pipeline(df, return_timing=True)
     
     # Pemetaan hasil prediksi ke titik visualisasi Web GIS
@@ -155,29 +169,39 @@ def process_gee_polygon(coords, year):
     
     for _, row in df_pred.iterrows():
         status = row['health_status']
+        tier = row.get('priority_tier', '🟢 Tier 3: Normal Sehat')
+        action = row.get('recommended_action', '-')
+        score = float(row.get('anomaly_score', 0.0))
         vigor = row.get('vigor_score')
         vigor_val = round(float(vigor), 2) if pd.notnull(vigor) else None
         
-        if '🔴' in status or 'Sakit' in status:
-            color = '#e74c3c'
+        # Color coding berdasarkan Priority Tier
+        if 'Tier 1' in tier or '🔴' in status or 'Sakit' in status:
+            color = '#ef4444'  # Merah Karantina Darurat
             sick_count += 1
-        elif '🟢' in status or 'Sehat' in status:
-            color = '#2ecc71'
-            healthy_count += 1
-        elif '🟡' in status or 'Stres' in status:
-            color = '#f1c40f'
+        elif 'Tier 2' in tier or '🟡' in status or 'Stres' in status:
+            color = '#f59e0b'  # Kuning / Amber Stres Ringan
             stressed_count += 1
-        elif 'Muda' in status:
-            color = '#3498db'
+        elif 'Super' in tier:
+            color = '#10b981'  # Hijau Emerald Super Vigor
+            healthy_count += 1
+        elif 'Tier 3' in tier or '🟢' in status or 'Sehat' in status:
+            color = '#22c55e'  # Hijau Normal Sehat
+            healthy_count += 1
+        elif 'Muda' in tier or 'Muda' in status:
+            color = '#38bdf8'  # Biru Muda / Terbuka
             young_count += 1
         else:
-            color = '#94a3b8'
+            color = '#94a3b8'  # Abu-abu (Disaring: Non-Sawit/Jalan)
             filtered_count += 1
             
         points.append({
             'lat': float(row['lat']),
             'lon': float(row['lon']),
             'status': str(status),
+            'priority_tier': str(tier),
+            'action': str(action),
+            'anomaly_score': round(score, 4),
             'color': color,
             'vigor': vigor_val,
             'ndvi': round(float(row.get('NDVI', 0)), 3),
@@ -192,6 +216,9 @@ def process_gee_polygon(coords, year):
     sick_pct = round((sick_count / palm_total) * 100, 1)
     stressed_pct = round((stressed_count / palm_total) * 100, 1)
     healthy_pct = round((healthy_count / palm_total) * 100, 1)
+    
+    sawit_scores = [p['anomaly_score'] for p in points if 'Bukan' not in p['status'] and 'Non-Sawit' not in p['status']]
+    avg_score = round(float(np.mean(sawit_scores)), 3) if len(sawit_scores) > 0 else 0.0
     
     if sick_pct > 10:
         alert = "BAHAYA: Kluster Penyakit Tinggi (>10%)"
@@ -216,11 +243,12 @@ def process_gee_polygon(coords, year):
             'stressed_pct': stressed_pct,
             'sick_count': sick_count,
             'sick_pct': sick_pct,
+            'avg_anomaly_score': avg_score,
             'alert': alert,
             'alert_class': alert_class,
             'ml_timing': ml_timing,
             'gee_time_sec': gee_time_sec,
-            'model_engine': 'Random Forest 2-Layer (Hierarchical AI)'
+            'model_engine': 'Random Forest 2-Layer + Isolation Forest Anomaly Scoring'
         }
     }
 
@@ -262,22 +290,32 @@ def simulate_polygon_analysis(coords):
     sick_count = 0
     stressed_count = 0
     healthy_count = 0
+    young_count = 0
     filtered_count = 0
     
     for _, row in df_pred.iterrows():
         status = row['health_status']
+        tier = row.get('priority_tier', '🟢 Tier 3: Normal Sehat')
+        action = row.get('recommended_action', '-')
+        score = float(row.get('anomaly_score', 0.0))
         vigor = row.get('vigor_score')
         vigor_val = round(float(vigor), 2) if pd.notnull(vigor) else None
         
-        if '🔴' in status or 'Sakit' in status:
-            color = '#e74c3c'
+        if 'Tier 1' in tier or '🔴' in status or 'Sakit' in status:
+            color = '#ef4444'
             sick_count += 1
-        elif '🟢' in status or 'Sehat' in status:
-            color = '#2ecc71'
-            healthy_count += 1
-        elif '🟡' in status or 'Stres' in status:
-            color = '#f1c40f'
+        elif 'Tier 2' in tier or '🟡' in status or 'Stres' in status:
+            color = '#f59e0b'
             stressed_count += 1
+        elif 'Super' in tier:
+            color = '#10b981'
+            healthy_count += 1
+        elif 'Tier 3' in tier or '🟢' in status or 'Sehat' in status:
+            color = '#22c55e'
+            healthy_count += 1
+        elif 'Muda' in tier or 'Muda' in status:
+            color = '#38bdf8'
+            young_count += 1
         else:
             color = '#94a3b8'
             filtered_count += 1
@@ -286,6 +324,9 @@ def simulate_polygon_analysis(coords):
             'lat': float(row['lat']),
             'lon': float(row['lon']),
             'status': str(status),
+            'priority_tier': str(tier),
+            'action': str(action),
+            'anomaly_score': round(score, 4),
             'color': color,
             'vigor': vigor_val,
             'ndvi': round(float(row.get('NDVI', 0)), 3),
@@ -295,10 +336,13 @@ def simulate_polygon_analysis(coords):
         })
         
     total_pts = len(points)
-    palm_total = max(1, (healthy_count + stressed_count + sick_count))
+    palm_total = max(1, (healthy_count + stressed_count + sick_count + young_count))
     sick_pct = round((sick_count / palm_total) * 100, 1)
     stressed_pct = round((stressed_count / palm_total) * 100, 1)
     healthy_pct = round((healthy_count / palm_total) * 100, 1)
+    
+    sawit_scores = [p['anomaly_score'] for p in points if 'Bukan' not in p['status'] and 'Non-Sawit' not in p['status']]
+    avg_score = round(float(np.mean(sawit_scores)), 3) if len(sawit_scores) > 0 else 0.0
     
     return {
         'points': points,
@@ -313,11 +357,12 @@ def simulate_polygon_analysis(coords):
             'stressed_pct': stressed_pct,
             'sick_count': sick_count,
             'sick_pct': sick_pct,
-            'alert': "SIMULASI OFFLINE: Data dievaluasi via XGBoost lokal",
+            'avg_anomaly_score': avg_score,
+            'alert': "SIMULASI OFFLINE: Data dievaluasi via Random Forest + iForest lokal",
             'alert_class': "warning",
             'ml_timing': ml_timing,
             'gee_time_sec': 0.01,
-            'model_engine': 'XGBoost 2-Layer (Simulasi)'
+            'model_engine': 'Random Forest 2-Layer + Isolation Forest Anomaly Scoring (Simulasi)'
         }
     }
 

@@ -58,11 +58,21 @@ def inspect_polygon_health(polygon_ee, nama_blok="Blok_Kebun_Uji", year=2024, ou
     start_date = f"{year}-01-01"
     end_date   = f"{year}-12-31"
     
-    print(f"[1/4] Mengambil citra Sentinel-2 bebas awan tahun {year}...")
-    s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
+    print(f"[1/4] Mengambil citra Sentinel-2 bebas awan & bayangan awan (QA60 + CloudScore+) tahun {year}...")
+    cs_plus = ee.ImageCollection('GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED')
+    s2_col = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
         .filterBounds(aoi) \
         .filterDate(start_date, end_date) \
-        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 45)) \
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 50))
+        
+    def mask_clouds_and_shadows(img):
+        qa = img.select('QA60')
+        qa_mask = qa.bitwiseAnd(1 << 10).eq(0).And(qa.bitwiseAnd(1 << 11).eq(0))
+        cs_mask = img.select('cs').gte(0.60)
+        return img.updateMask(qa_mask.And(cs_mask))
+
+    s2 = s2_col.linkCollection(cs_plus, ['cs']) \
+        .map(mask_clouds_and_shadows) \
         .median() \
         .select(['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12']) \
         .clip(aoi)
@@ -111,35 +121,41 @@ def inspect_polygon_health(polygon_ee, nama_blok="Blok_Kebun_Uji", year=2024, ou
         })
     df = pd.DataFrame(records)
     
-    # 5. Klasifikasi Menggunakan Pipeline Machine Learning (XGBoost 2-Layer)
-    print("[3/4] Menjalankan Pipeline Machine Learning (XGBoost 2-Layer) + Health Assessment...")
+    # 5. Klasifikasi Menggunakan Pipeline Machine Learning (RF 2-Layer + iForest Anomaly Scoring)
+    print("[3/4] Menjalankan Pipeline Machine Learning (RF 2-Layer + iForest Anomaly Scoring)...")
     df_pred, timing = predict_pipeline(df, return_timing=True)
     df['status'] = df_pred['health_status']
+    df['priority_tier'] = df_pred['priority_tier']
+    df['anomaly_score'] = df_pred['anomaly_score']
+    df['recommended_action'] = df_pred['recommended_action']
     df['vigor_score'] = df_pred['vigor_score']
     
     print(f"      >> [BENCHMARK ML] Selesai memprediksi {timing['total_samples']:,} titik pohon dalam {timing['elapsed_sec']} detik ({timing['elapsed_ms']} ms)!")
     print(f"      >> [KECEPATAN ML] {timing['ms_per_sample']} ms per pohon.")
     
     # Ringkasan Statistik
-    stats = df['status'].value_counts()
-    print("\n--- RINGKASAN HASIL DIAGNOSA KESEHATAN KEBUN ---")
+    stats = df['priority_tier'].value_counts()
+    print("\n--- RINGKASAN HASIL TRIAGE KESEHATAN KEBUN (iForest) ---")
     total = len(df)
     for k, v in stats.items():
         pct = (v / total) * 100
-        print(f"  {k:<42}: {v:>5,} titik ({pct:>5.1f}%)")
+        print(f"  {k:<36}: {v:>5,} titik ({pct:>5.1f}%)")
         
-    sick_count = (df['status'] == '🔴 SAWIT SAKIT (Stres Berat / Ganoderma)').sum()
-    sick_pct = (sick_count / total) * 100
-    print(f"\n>> KESIMPULAN BLOK: {sick_pct:.1f}% area terindikasi sakit!")
-    if sick_pct > 10:
+    tier1_count = df['priority_tier'].str.contains('Tier 1').sum()
+    tier2_count = df['priority_tier'].str.contains('Tier 2').sum()
+    palm_total = max(1, total - df['status'].str.contains('Non-Sawit|Bukan').sum())
+    tier1_pct = (tier1_count / palm_total) * 100
+    
+    print(f"\n>> KESIMPULAN BLOK: {tier1_pct:.1f}% area terindikasi Karantina Darurat (Tier 1)!")
+    if tier1_pct > 10:
         print(">> PERINGATAN: Blok ini memiliki intensitas infeksi TINGGI. Segera lakukan sanitasi/karantina!")
-    elif sick_pct > 3:
-        print(">> PERINGATAN: Ditemukan kluster pohon sakit. Rekomendasi: ground check target merah.")
+    elif tier1_pct > 3:
+        print(">> PERINGATAN: Ditemukan kluster pohon sakit. Rekomendasi: ground check target Tier 1.")
     else:
         print(">> STATUS AMAN: Kebun mayoritas berada dalam kondisi sehat prima.")
         
     # 6. Pembuatan Peta Interaktif Spasial untuk Poligon Tersebut
-    print("\n[4/4] Membangun Peta Interaktif & Menandai Titik Sakit...")
+    print("\n[4/4] Membangun Peta Interaktif & Menandai Titik Anomali...")
     center_lat = df['lat'].mean()
     center_lon = df['lon'].mean()
     
@@ -155,48 +171,56 @@ def inspect_polygon_health(polygon_ee, nama_blok="Blok_Kebun_Uji", year=2024, ou
     ).add_to(m)
     
     # Feature Groups
-    fg_sehat  = folium.FeatureGroup(name='🟢 Sawit Sehat Prima', show=True)
-    fg_ringan = folium.FeatureGroup(name='🟡 Sawit Stres Ringan', show=True)
-    fg_sakit  = folium.FeatureGroup(name='🔴 SAWIT SAKIT (FOKUS INSPEKSI)', show=True)
+    fg_sehat  = folium.FeatureGroup(name='🟢 Tier 3: Normal Sehat', show=True)
+    fg_ringan = folium.FeatureGroup(name='🟡 Tier 2: Stres Ringan', show=True)
+    fg_sakit  = folium.FeatureGroup(name='🔴 Tier 1: Karantina Darurat (URGENT)', show=True)
     fg_lain   = folium.FeatureGroup(name='⚪ Non-Sawit / Jalan Kebun', show=False)
     
-    sick_coords = []
+    heat_coords = []
     
     for _, r in df.iterrows():
-        st = r['status']
+        tier = str(r['priority_tier'])
+        st = str(r['status'])
         lat, lon = r['lat'], r['lon']
+        score = float(r['anomaly_score'])
+        act = str(r['recommended_action'])
         
         popup_txt = f"""
+        <b>Prioritas:</b> {tier}<br>
         <b>Status:</b> {st}<br>
+        <b>Skor Anomali:</b> <b>{score:.3f}</b><br>
         <b>GPS:</b> {lat:.5f}, {lon:.5f}<br>
-        <b>Vigor:</b> {r['vigor_score']:.2f}<br>
         <b>NDRE (Klorofil):</b> {r['NDRE']:.3f}<br>
         <b>NDVI:</b> {r['NDVI']:.3f}<br>
-        <b>MSI:</b> {r['MSI']:.3f}
+        <b>MSI:</b> {r['MSI']:.3f}<br>
+        <hr style="margin:4px 0;">
+        <small><b>Tindakan:</b> {act}</small>
         """
         
-        if '🔴 SAWIT SAKIT' in st:
-            sick_coords.append([lat, lon, 1.0])
+        if 'Tier 1' in tier or 'SAWIT SAKIT' in st:
+            heat_coords.append([lat, lon, score])
             folium.CircleMarker(
                 location=[lat, lon],
-                radius=6,
+                radius=6.5,
                 color='#ff0000',
                 fill=True,
                 fill_color='#ff0000',
                 fill_opacity=0.9,
-                popup=folium.Popup(popup_txt, max_width=250)
+                popup=folium.Popup(popup_txt, max_width=260)
             ).add_to(fg_sakit)
-        elif '🟡 Sawit Stres' in st:
+        elif 'Tier 2' in tier or 'Stres' in st:
+            if score >= 0.40:
+                heat_coords.append([lat, lon, score])
             folium.CircleMarker(
                 location=[lat, lon],
-                radius=4,
+                radius=4.5,
                 color='#f39c12',
                 fill=True,
                 fill_color='#f1c40f',
-                fill_opacity=0.7,
-                popup=folium.Popup(popup_txt, max_width=250)
+                fill_opacity=0.75,
+                popup=folium.Popup(popup_txt, max_width=260)
             ).add_to(fg_ringan)
-        elif '🟢 Sawit Sehat' in st:
+        elif 'Tier 3' in tier or 'Sehat' in st:
             folium.CircleMarker(
                 location=[lat, lon],
                 radius=3,
@@ -204,7 +228,7 @@ def inspect_polygon_health(polygon_ee, nama_blok="Blok_Kebun_Uji", year=2024, ou
                 fill=True,
                 fill_color='#2ecc71',
                 fill_opacity=0.6,
-                popup=folium.Popup(popup_txt, max_width=250)
+                popup=folium.Popup(popup_txt, max_width=260)
             ).add_to(fg_sehat)
         else:
             folium.CircleMarker(
@@ -213,14 +237,14 @@ def inspect_polygon_health(polygon_ee, nama_blok="Blok_Kebun_Uji", year=2024, ou
                 color='#95a5a6',
                 fill=True,
                 fill_color='#bdc3c7',
-                fill_opacity=0.4,
-                popup=folium.Popup(popup_txt, max_width=250)
+                fill_opacity=0.35,
+                popup=folium.Popup(popup_txt, max_width=260)
             ).add_to(fg_lain)
             
-    # Tambahkan Heatmap Kluster Penyakit jika ada
-    if len(sick_coords) > 0:
-        fg_heat = folium.FeatureGroup(name='🔥 Hotspot Kluster Sakit', show=True)
-        HeatMap(sick_coords, radius=20, blur=15, min_opacity=0.5).add_to(fg_heat)
+    # Tambahkan Weighted Anomaly Heatmap
+    if len(heat_coords) > 0:
+        fg_heat = folium.FeatureGroup(name='🔥 Weighted Anomaly Heatmap (iForest)', show=True)
+        HeatMap(heat_coords, radius=22, blur=15, min_opacity=0.45).add_to(fg_heat)
         fg_heat.add_to(m)
         
     fg_sehat.add_to(m)
@@ -235,12 +259,18 @@ def inspect_polygon_health(polygon_ee, nama_blok="Blok_Kebun_Uji", year=2024, ou
     print(f"\n>> Peta hasil inspeksi poligon tersimpan di:")
     print(f"   {output_html}")
     
-    # Simpan juga koordinat titik sakit ke CSV agar bisa langsung dibawa ke GPS tim lapangan
-    sick_df = df[df['status'] == '🔴 SAWIT SAKIT (Stres Berat / Ganoderma)'][['lat', 'lon', 'vigor_score', 'NDRE', 'NDVI', 'MSI']]
-    output_csv = os.path.join(output_dir, f"target_ground_check_{nama_blok}.csv")
-    sick_df.to_csv(output_csv, index=False)
-    print(f">> Daftar koordinat GPS pohon sakit diekspor ke:")
-    print(f"   {output_csv} (Siap di-load ke GPS / Google Maps tim lapangan!)")
+    # Ekspor koordinat target ground check terurut berdasarkan Skor Anomali tertinggi
+    triage_mask = df['priority_tier'].str.contains('Tier 1|Tier 2') | df['status'].str.contains('SAWIT SAKIT')
+    target_df = df[triage_mask].copy()
+    if len(target_df) > 0:
+        target_df = target_df.sort_values(by='anomaly_score', ascending=False).reset_index(drop=True)
+        target_df['Ranking_Prioritas'] = target_df.index + 1
+        cols_export = ['Ranking_Prioritas', 'lat', 'lon', 'anomaly_score', 'priority_tier', 'status', 'recommended_action', 'NDRE', 'NDVI', 'MSI']
+        target_df = target_df[cols_export]
+        output_csv = os.path.join(output_dir, f"target_ground_check_{nama_blok}.csv")
+        target_df.to_csv(output_csv, index=False)
+        print(f">> Daftar target ground check terurut prioritas darurat diekspor ke:")
+        print(f"   {output_csv} (Total: {len(target_df)} pohon prioritas)")
     print("=" * 65)
     
     return output_html

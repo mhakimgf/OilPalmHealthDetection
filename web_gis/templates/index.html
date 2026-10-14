@@ -32,7 +32,7 @@
                     <i class="fa-solid fa-seedling"></i>
                     <div>
                         <h2>PALM-GUARD GIS</h2>
-                        <p>Sentinel-2 Hierarchical Health Diagnostic</p>
+                        <p>Sentinel-2 RF 2-Layer &bull; iForest Anomaly Scoring</p>
                     </div>
                 </div>
                 <div class="gee-badge {% if gee_status %}connected{% else %}offline{% endif %}">
@@ -65,7 +65,7 @@
                     </div>
 
                     <div class="multi-polygon-hint" style="margin-top: 10px; font-size: 11px; color: var(--text-muted); line-height: 1.4; background: rgba(255,255,255,0.03); border: 1px dashed var(--border-color); border-radius: 6px; padding: 8px 10px;">
-                        <i class="fa-solid fa-layer-group" style="color: var(--primary);"></i> <b>Multi-Poligon:</b> Buat beberapa poligon tanpa terhapus. Klik <b>garis tepi poligon</b> di peta untuk menghapus blok tersebut, atau tombol <i class="fa-solid fa-trash text-danger"></i> untuk hapus semua.
+                        <i class="fa-solid fa-layer-group" style="color: var(--primary);"></i> <b>Multi-Poligon:</b> Buat beberapa poligon tanpa terhapus. Kelola dan hapus blok secara aman melalui <b>Daftar Blok</b> di sidebar atau tombol tempat sampah.
                     </div>
                 </div>
 
@@ -82,7 +82,7 @@
                     </div>
 
                     <button id="btnRun" class="btn btn-primary btn-block" disabled>
-                        <i class="fa-solid fa-bolt"></i> Jalankan Analisis 2-Layer
+                        <i class="fa-solid fa-bolt"></i> Jalankan Analisis (RF + iForest)
                     </button>
                 </div>
 
@@ -103,7 +103,7 @@
                         <span id="badgeAlert" class="alert-badge warning">WASPADA</span>
                     </div>
 
-                    <div class="kpi-grid">
+                    <div class="kpi-grid" style="grid-template-columns: repeat(3, 1fr);">
                         <div class="kpi-item">
                             <span class="kpi-label">Luas Area</span>
                             <span id="valArea" class="kpi-value">- Ha</span>
@@ -112,14 +112,18 @@
                             <span class="kpi-label">Titik Pohon</span>
                             <span id="valPoints" class="kpi-value">-</span>
                         </div>
+                        <div class="kpi-item">
+                            <span class="kpi-label">Skor Anomali</span>
+                            <span id="valAvgScore" class="kpi-value" style="color: #f59e0b;">0.000</span>
+                        </div>
                     </div>
 
                     <!-- Benchmark Kecepatan Model Machine Learning -->
                     <div class="kpi-grid" style="margin-top: 8px;">
-                        <div class="kpi-item" style="grid-column: span 2; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; padding: 8px 10px;">
+                        <div class="kpi-item" style="grid-column: span 3; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; padding: 8px 10px;">
                             <div style="display: flex; justify-content: space-between; align-items: center;">
                                 <span class="kpi-label" style="font-size: 11px; margin-bottom: 0;">
-                                    <i class="fa-solid fa-tree text-success"></i> Inferensi Model (Random Forest)
+                                    <i class="fa-solid fa-tree text-success"></i> Inferensi Model (RF + iForest Anomaly)
                                 </span>
                                 <span id="valMlTime" class="kpi-value" style="font-size: 13px; font-weight: 700; color: #38bdf8;">-</span>
                             </div>
@@ -140,17 +144,17 @@
                         <div class="stat-rows">
                             <div class="stat-row">
                                 <span class="indicator healthy"></span>
-                                <span class="stat-name">Sawit Sehat Prima</span>
+                                <span class="stat-name">🟢 Tier 3: Normal Sehat</span>
                                 <span id="valHealthyPct" class="stat-pct">0%</span>
                             </div>
                             <div class="stat-row">
                                 <span class="indicator stressed"></span>
-                                <span class="stat-name">Stres Ringan (Defisiensi)</span>
+                                <span class="stat-name">🟡 Tier 2: Stres Ringan</span>
                                 <span id="valStressedPct" class="stat-pct">0%</span>
                             </div>
                             <div class="stat-row">
                                 <span class="indicator sick"></span>
-                                <span class="stat-name">SAWIT SAKIT (Kritis)</span>
+                                <span class="stat-name">🔴 Tier 1: Karantina Darurat</span>
                                 <span id="valSickPct" class="stat-pct bold text-danger">0%</span>
                             </div>
                             <div class="stat-row"
@@ -162,16 +166,28 @@
                         </div>
                     </div>
 
+                    <!-- Section Daftar Blok Kebun Aktif -->
+                    <div class="active-blocks-section" style="margin-top: 14px; border-top: 1px solid var(--border-color); padding-top: 10px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">
+                                <i class="fa-solid fa-layer-group"></i> Daftar Blok Kebun Aktif
+                            </span>
+                        </div>
+                        <div id="activeBlocksList" class="active-blocks-list" style="display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow-y: auto; margin-bottom: 12px;">
+                            <!-- Di-render dinamis oleh app.js -->
+                        </div>
+                    </div>
+
                     <div class="export-actions">
                         <button id="btnExportCSV" class="btn btn-success btn-block">
-                            <i class="fa-solid fa-file-csv"></i> Unduh Target GPS Pohon Sakit (.CSV)
+                            <i class="fa-solid fa-file-csv"></i> Unduh Target GPS Prioritas Lapangan (.CSV)
                         </button>
                     </div>
                 </div>
             </div>
 
             <div class="sidebar-footer">
-                <small>PRODS Sawit &bull; Model Hierarkis 2-Layer &bull; Sentinel-2</small>
+                <small>PRODS Sawit &bull; RF 2-Layer + iForest Anomaly Scoring &bull; Sentinel-2</small>
             </div>
         </aside>
 
@@ -181,16 +197,17 @@
 
             <!-- Floating Map Legend -->
             <div class="map-legend">
-                <h4>Legenda Kesehatan</h4>
-                <div class="legend-item"><span class="color-box healthy"></span> Sawit Sehat Prima</div>
-                <div class="legend-item"><span class="color-box stressed"></span> Stres Ringan (Pupuk/Air)</div>
-                <div class="legend-item"><span class="color-box sick"></span> SAWIT SAKIT (Target Karantina)</div>
-                <div class="legend-item"><span class="color-box other"></span> Non-Sawit / Jalan Kebun</div>
+                <h4>Triage Kesehatan (iForest)</h4>
+                <div class="legend-item"><span class="color-box sick" style="background:#ef4444;"></span> 🔴 Tier 1: Karantina (Skor ≥ 0.65)</div>
+                <div class="legend-item"><span class="color-box stressed" style="background:#f59e0b;"></span> 🟡 Tier 2: Stres Ringan (0.40 - 0.65)</div>
+                <div class="legend-item"><span class="color-box healthy" style="background:#22c55e;"></span> 🟢 Tier 3: Normal Sehat (&lt; 0.40)</div>
+                <div class="legend-item"><span class="color-box other" style="background:#38bdf8;"></span> 🔵 Sawit Muda / Terbuka</div>
+                <div class="legend-item"><span class="color-box other" style="background:#94a3b8;"></span> ⚪ Non-Sawit / Jalan Kebun</div>
                 <hr>
                 <label class="toggle-switch">
                     <input type="checkbox" id="toggleHeatmap" checked>
                     <span class="slider round"></span>
-                    <span class="toggle-label">🔥 Heatmap Hotspot Sakit</span>
+                    <span class="toggle-label">🔥 Weighted Anomaly Heatmap</span>
                 </label>
             </div>
         </main>
@@ -200,7 +217,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.min.js"></script>
     <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-    <script src="{{ url_for('static', filename='app.js') }}?v=3"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=5"></script>
 </body>
 
 </html>

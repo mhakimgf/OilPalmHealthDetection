@@ -55,6 +55,10 @@ document.addEventListener('DOMContentLoaded', () => {
         map.invalidateSize();
     }, 200);
 
+    // Custom Pane khusus Titik Prediksi Sawit (Z-Index 620: di atas poligon 400, di bawah popup 700)
+    map.createPane('palmPointsPane');
+    map.getPane('palmPointsPane').style.zIndex = '620';
+
     // 3. Geoman Drawing Controls (Polygon & Rectangle)
     map.pm.addControls({
         position: 'topleft',
@@ -270,92 +274,118 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Pendaftaran Blok Hasil Analisis & Pembuatan Layer Titik
     function registerAnalyzedBlock(blockId, polyLayer, data) {
-        // Style permanen untuk poligon teranalisis (biru laut dengan kursor interaktif)
+        // Style permanen untuk poligon teranalisis (garis batas kebun rapi, tanpa membajak klik)
         polyLayer.setStyle({
             color: '#38bdf8',
-            weight: 3.5,
+            weight: 2.5,
             dashArray: null,
             fillColor: '#38bdf8',
-            fillOpacity: 0.1
+            fillOpacity: 0.05
         });
+
+        // Bersihkan listener event yang destruktif agar tidak membajak klik titik
+        polyLayer.off('click');
+        polyLayer.off('mouseover');
+        polyLayer.off('mouseout');
+        if (polyLayer.unbindTooltip) polyLayer.unbindTooltip();
+
+        // Popup informatif saat garis poligon diklik (tidak langsung menghapus secara mendadak)
+        polyLayer.bindPopup(`
+            <div style="font-size: 12px; line-height: 1.5; min-width: 170px;">
+                <div style="font-size: 13px; font-weight: 700; color: #38bdf8; margin-bottom: 4px;">
+                    <i class="fa-solid fa-draw-polygon"></i> Blok #${blockId}
+                </div>
+                <div>Luas: <b>${data.summary.area_ha} Ha</b></div>
+                <div>Total Titik: <b>${data.summary.palm_points} Pohon</b></div>
+                ${data.summary.sick_count > 0 ? `<div style="color: #ef4444; font-weight: 600;">Sawit Sakit: ${data.summary.sick_count} Pohon (${data.summary.sick_pct}%)</div>` : ''}
+                <hr style="margin: 6px 0; border: 0; border-top: 1px solid rgba(255,255,255,0.15);">
+                <button class="btn btn-sm btn-danger-outline" style="width: 100%; padding: 4px 8px; font-size: 11px; cursor: pointer;" onclick="deleteAnalyzedBlock(${blockId})">
+                    <i class="fa-solid fa-trash"></i> Hapus Blok Ini
+                </button>
+            </div>
+        `);
 
         // Layer group tersendiri untuk titik-titik di blok ini
         const blockPointsGroup = L.layerGroup().addTo(map);
         const blockSickPoints = [];
 
         data.points.forEach(pt => {
-            const isSick = pt.status.includes('SAWIT SAKIT');
-            const isFiltered = pt.status.includes('Bukan') || pt.status.includes('Non-Sawit');
+            const isTier1 = (pt.priority_tier && pt.priority_tier.includes('Tier 1')) || pt.status.includes('SAWIT SAKIT');
+            const isTier2 = (pt.priority_tier && pt.priority_tier.includes('Tier 2')) || pt.status.includes('Stres');
+            const isFiltered = pt.status.includes('Bukan') || pt.status.includes('Non-Sawit') || (pt.priority_tier && pt.priority_tier.includes('Filter'));
+
+            const anomScore = pt.anomaly_score !== undefined ? Number(pt.anomaly_score).toFixed(3) : '-';
+            const tierBadge = pt.priority_tier || (isTier1 ? '🔴 Tier 1: Karantina' : (isTier2 ? '🟡 Tier 2: Stres' : '🟢 Tier 3: Sehat'));
+            const actionText = pt.action || '-';
 
             const popupHtml = `
-                <div style="font-size: 12px; line-height: 1.5; min-width: 175px;">
-                    <div style="font-size: 11px; color: #64748b; font-weight: 600; margin-bottom: 2px;">
-                        <i class="fa-solid fa-draw-polygon"></i> Blok #${blockId}
+                <div style="font-size: 12px; line-height: 1.5; min-width: 220px; max-width: 280px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                        <span style="font-size: 11px; color: #64748b; font-weight: 700;">
+                            <i class="fa-solid fa-draw-polygon"></i> Blok #${blockId}
+                        </span>
+                        <span style="font-size: 10px; background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 4px;">
+                            ${pt.lat.toFixed(5)}, ${pt.lon.toFixed(5)}
+                        </span>
                     </div>
-                    <b style="color: ${pt.color}; font-size: 13px;">${pt.status}</b><br>
-                    <hr style="margin: 4px 0; border: 0; border-top: 1px solid #ccc;">
-                    ${pt.vigor !== null ? `<b>Vigor Score:</b> ${pt.vigor}<br>` : ''}
-                    <b>NDRE (Klorofil):</b> ${pt.ndre}<br>
-                    <b>NDVI (Biomassa):</b> ${pt.ndvi}<br>
-                    <b>NDBI (Bangunan/Jalan):</b> ${pt.ndbi || 'N/A'}<br>
-                    <b>MSI (Stres Air):</b> ${pt.msi}<br>
-                    <b>GPS:</b> ${pt.lat.toFixed(5)}, ${pt.lon.toFixed(5)}
+                    <div style="padding: 4px 8px; border-radius: 4px; background: ${isTier1 ? 'rgba(239,68,68,0.18)' : (isTier2 ? 'rgba(245,158,11,0.18)' : (isFiltered ? 'rgba(148,163,184,0.12)' : 'rgba(34,197,94,0.15)'))}; margin-bottom: 6px;">
+                        <b style="color: ${pt.color}; font-size: 12px;">${pt.status}</b>
+                    </div>
+                    <div style="margin-bottom: 6px; padding: 4px 6px; background: rgba(0,0,0,0.2); border-radius: 4px; font-size: 11px;">
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="color: #94a3b8;">Skor Anomali:</span>
+                            <b style="color: ${Number(anomScore) >= 0.65 ? '#ef4444' : (Number(anomScore) >= 0.40 ? '#f59e0b' : '#38bdf8')}; font-size: 12px;">${anomScore}</b>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-top: 2px;">
+                            <span style="color: #94a3b8;">Prioritas:</span>
+                            <span style="font-weight: 600;">${tierBadge}</span>
+                        </div>
+                    </div>
+                    <table style="width: 100%; font-size: 11px; border-collapse: collapse; margin-bottom: 6px;">
+                        <tr><td style="color:#94a3b8; padding: 2px 0;">NDRE (Klorofil):</td><td style="font-weight:700; text-align:right;">${pt.ndre}</td></tr>
+                        <tr><td style="color:#94a3b8; padding: 2px 0;">NDVI (Biomassa):</td><td style="font-weight:700; text-align:right;">${pt.ndvi}</td></tr>
+                        <tr><td style="color:#94a3b8; padding: 2px 0;">MSI (Stres Air):</td><td style="font-weight:700; text-align:right;">${pt.msi}</td></tr>
+                        ${pt.ndbi ? `<tr><td style="color:#94a3b8; padding: 2px 0;">NDBI:</td><td style="font-weight:700; text-align:right;">${pt.ndbi}</td></tr>` : ''}
+                    </table>
+                    ${actionText !== '-' ? `
+                    <div style="font-size: 10px; color: #cbd5e1; background: rgba(255,255,255,0.04); padding: 5px 7px; border-left: 2px solid ${pt.color}; border-radius: 2px; line-height: 1.35;">
+                        <i class="fa-solid fa-clipboard-check" style="color: ${pt.color};"></i> <b>Tindakan:</b> ${actionText}
+                    </div>` : ''}
                 </div>
             `;
 
             const marker = L.circleMarker([pt.lat, pt.lon], {
-                radius: isSick ? 6.5 : (isFiltered ? 2.5 : 4),
-                color: pt.color,
+                pane: 'palmPointsPane', // Menjamin titik SELALU di atas poligon
+                radius: isTier1 ? 7.5 : (isTier2 ? 6 : (isFiltered ? 3 : 5)),
+                color: isTier1 ? '#ffffff' : (isTier2 ? '#ffffff' : pt.color),
                 fillColor: pt.color,
-                fillOpacity: isSick ? 0.95 : (isFiltered ? 0.35 : 0.8),
-                weight: isSick ? 2.5 : (isFiltered ? 0.5 : 1)
-            }).bindPopup(popupHtml);
+                fillOpacity: isTier1 ? 1.0 : (isTier2 ? 0.9 : (isFiltered ? 0.35 : 0.85)),
+                weight: isTier1 ? 2 : (isTier2 ? 1.5 : (isFiltered ? 0.5 : 1)),
+                className: 'palm-point-marker'
+            }).bindPopup(popupHtml, { autoPan: true });
 
-            // Hentikan bubbling klik agar tidak memicu penghapusan poligon
+            // Efek hover interaktif halus pada titik
+            marker.on('mouseover', function () {
+                this.setRadius(isTier1 ? 9.5 : (isTier2 ? 7.5 : (isFiltered ? 4.5 : 7)));
+                this.bringToFront();
+            });
+
+            marker.on('mouseout', function () {
+                this.setRadius(isTier1 ? 7.5 : (isTier2 ? 6 : (isFiltered ? 3 : 5)));
+            });
+
+            // Pastikan event klik pada titik tidak bocor ke peta/poligon
             marker.on('click', (e) => {
                 L.DomEvent.stopPropagation(e);
             });
 
             blockPointsGroup.addLayer(marker);
 
-            if (isSick) {
+            // Anomaly Heatmap: Beri bobot intensitas kontinu sesuai skor anomali iForest
+            if (pt.anomaly_score !== undefined && pt.anomaly_score >= 0.40 && !isFiltered) {
+                blockSickPoints.push([pt.lat, pt.lon, Number(pt.anomaly_score)]);
+            } else if (isTier1) {
                 blockSickPoints.push([pt.lat, pt.lon, 1.0]);
-            }
-        });
-
-        // Tooltip pada garis poligon
-        polyLayer.bindTooltip(`
-            <div style="font-size: 12px; line-height: 1.4;">
-                <b style="color: #38bdf8;">Blok #${blockId}</b> (${data.summary.area_ha} Ha &bull; ${data.summary.palm_points} Pohon)<br>
-                <span style="color: #ef4444; font-weight: 600;">
-                    <i class="fa-solid fa-trash"></i> Klik garis poligon untuk hapus blok ini
-                </span>
-            </div>
-        `, { sticky: true });
-
-        // Efek Hover Garis Poligon: Berubah merah dan menebal agar pengguna tahu bisa diklik untuk dihapus
-        polyLayer.on('mouseover', () => {
-            polyLayer.setStyle({
-                color: '#ef4444',
-                weight: 5,
-                fillOpacity: 0.2
-            });
-        });
-
-        polyLayer.on('mouseout', () => {
-            polyLayer.setStyle({
-                color: '#38bdf8',
-                weight: 3.5,
-                fillOpacity: 0.1
-            });
-        });
-
-        // Event Klik Garis Poligon: Hapus poligon tersebut beserta titik prediksinya
-        polyLayer.on('click', (e) => {
-            L.DomEvent.stopPropagation(e);
-            const msg = `Hapus Poligon Blok #${blockId} (${data.summary.area_ha} Ha) beserta ${data.summary.palm_points} titik prediksinya?`;
-            if (confirm(msg)) {
-                deleteAnalyzedBlock(blockId, true);
             }
         });
 
@@ -373,7 +403,7 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshSidebarDashboard();
 
         polygonStatus.className = 'polygon-status ready';
-        polygonStatus.innerHTML = `<i class="fa-solid fa-circle-check text-success"></i> <b>Blok #${blockId} Selesai.</b> Total <b>${analyzedBlocks.length} blok aktif</b> di peta.<br><small style="color:var(--text-muted);">Gambar poligon lain untuk menambah blok tanpa menghapus hasil ini.</small>`;
+        polygonStatus.innerHTML = `<i class="fa-solid fa-circle-check text-success"></i> <b>Blok #${blockId} Selesai.</b> Total <b>${analyzedBlocks.length} blok aktif</b>.<br><small style="color:var(--text-muted);">Klik titik mana pun untuk melihat detail spektral atau kelola via Daftar Blok di sidebar.</small>`;
     }
 
     // Fungsi Hapus Blok Tunggal (Dipanggil saat garis poligon diklik)
@@ -466,6 +496,8 @@ document.addEventListener('DOMContentLoaded', () => {
         let totalFiltered = 0;
         let totalMlMs = 0;
         let totalGeeSec = 0;
+        let totalAnomalySum = 0;
+        let totalAnomalyCount = 0;
 
         analyzedBlocks.forEach(b => {
             const s = b.data.summary;
@@ -477,11 +509,19 @@ document.addEventListener('DOMContentLoaded', () => {
             totalFiltered += (s.filtered_points || 0);
             if (s.ml_timing) totalMlMs += s.ml_timing.elapsed_ms;
             if (s.gee_time_sec) totalGeeSec += s.gee_time_sec;
+
+            b.data.points.forEach(pt => {
+                if (pt.anomaly_score !== undefined && !pt.status.includes('Bukan') && !pt.status.includes('Non-Sawit')) {
+                    totalAnomalySum += Number(pt.anomaly_score);
+                    totalAnomalyCount++;
+                }
+            });
         });
 
         const healthyPct = totalPoints > 0 ? ((totalHealthy / totalPoints) * 100).toFixed(1) : 0;
         const stressedPct = totalPoints > 0 ? ((totalStressed / totalPoints) * 100).toFixed(1) : 0;
         const sickPct = totalPoints > 0 ? ((totalSick / totalPoints) * 100).toFixed(1) : 0;
+        const avgAnomaly = totalAnomalyCount > 0 ? (totalAnomalySum / totalAnomalyCount).toFixed(3) : '0.000';
 
         if (valBlockCount) {
             valBlockCount.innerText = `${analyzedBlocks.length} Blok Aktif`;
@@ -489,6 +529,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         document.getElementById('valArea').innerText = `${totalArea.toFixed(2)} Ha`;
         document.getElementById('valPoints').innerText = `${totalPoints} Pkt`;
+        const valAvgElem = document.getElementById('valAvgScore');
+        if (valAvgElem) valAvgElem.innerText = avgAnomaly;
 
         document.getElementById('valHealthyPct').innerText = `${healthyPct}% (${totalHealthy})`;
         document.getElementById('valStressedPct').innerText = `${stressedPct}% (${totalStressed})`;
@@ -534,41 +576,108 @@ document.addEventListener('DOMContentLoaded', () => {
             if (msPointElem) msPointElem.innerText = `${s.ml_timing.ms_per_sample} ms/pohon`;
         }
 
+        // Render daftar blok aktif di sidebar
+        renderActiveBlocksList();
+
         resultsCard.style.display = 'block';
     }
 
-    // Export CSV Download untuk SEMUA Blok Aktif
+    // Fungsi Render Daftar Blok Aktif di Sidebar
+    function renderActiveBlocksList() {
+        const listElem = document.getElementById('activeBlocksList');
+        if (!listElem) return;
+        listElem.innerHTML = '';
+
+        analyzedBlocks.forEach(b => {
+            const s = b.data.summary;
+            const item = document.createElement('div');
+            item.className = 'active-block-item';
+            item.innerHTML = `
+                <div class="block-info">
+                    <span style="font-size: 12px; font-weight: 700; color: #38bdf8;">
+                        <i class="fa-solid fa-draw-polygon"></i> Blok #${b.id}
+                    </span>
+                    <span style="font-size: 11px; color: var(--text-muted);">
+                        ${s.area_ha} Ha &bull; ${s.palm_points} Pohon ${s.sick_count > 0 ? `<b style="color:#ef4444;">(${s.sick_count} Sakit)</b>` : ''}
+                    </span>
+                </div>
+                <div class="block-actions">
+                    <button class="btn btn-xs btn-outline" title="Fokus / Zoom ke Blok #${b.id}" onclick="zoomToBlock(${b.id})">
+                        <i class="fa-solid fa-crosshairs"></i>
+                    </button>
+                    <button class="btn btn-xs btn-danger-outline" title="Hapus Blok #${b.id}" onclick="confirmDeleteBlock(${b.id})">
+                        <i class="fa-solid fa-trash"></i>
+                    </button>
+                </div>
+            `;
+            listElem.appendChild(item);
+        });
+    }
+
+    // Fungsi Zoom ke Poligon Blok Tertentu
+    function zoomToBlock(blockId) {
+        const b = analyzedBlocks.find(item => item.id === blockId);
+        if (b && b.polygonLayer) {
+            map.fitBounds(b.polygonLayer.getBounds(), { padding: [40, 40] });
+            b.polygonLayer.openPopup();
+        }
+    }
+    window.zoomToBlock = zoomToBlock;
+
+    // Fungsi Konfirmasi Hapus Blok dari Tombol Sidebar
+    function confirmDeleteBlock(blockId) {
+        const b = analyzedBlocks.find(item => item.id === blockId);
+        const name = b ? `Blok #${blockId} (${b.data.summary.area_ha} Ha)` : `Blok #${blockId}`;
+        if (confirm(`Hapus ${name} beserta titik-titik prediksinya?`)) {
+            deleteAnalyzedBlock(blockId, true);
+        }
+    }
+    window.confirmDeleteBlock = confirmDeleteBlock;
+
+    // Export CSV Download untuk SEMUA Blok Aktif dengan Urutan Prioritas Triage Anomaly
     btnExportCSV.addEventListener('click', () => {
         if (analyzedBlocks.length === 0) {
             alert('Tidak ada blok kebun aktif.');
             return;
         }
 
-        const allSickPoints = [];
+        const allTargetPoints = [];
         analyzedBlocks.forEach(b => {
-            const sicks = b.data.points.filter(p => p.status.includes('SAWIT SAKIT'));
-            sicks.forEach(p => {
-                allSickPoints.push({
+            // Saring titik-titik yang membutuhkan inspeksi (Tier 1 Karantina dan Tier 2 Stres)
+            const targets = b.data.points.filter(p => 
+                (p.priority_tier && (p.priority_tier.includes('Tier 1') || p.priority_tier.includes('Tier 2'))) ||
+                p.status.includes('SAWIT SAKIT') ||
+                p.status.includes('Stres')
+            );
+            targets.forEach(p => {
+                allTargetPoints.push({
                     blockId: b.id,
                     ...p
                 });
             });
         });
 
-        if (allSickPoints.length === 0) {
-            alert('Tidak ada pohon sakit yang terdeteksi di seluruh blok aktif.');
+        if (allTargetPoints.length === 0) {
+            alert('Tidak ada pohon sakit atau stres yang terdeteksi di seluruh blok aktif.');
             return;
         }
 
-        let csvContent = "data:text/csv;charset=utf-8,Blok_ID,Latitude,Longitude,Vigor_Score,NDRE,NDVI,MSI,Status\n";
-        allSickPoints.forEach(p => {
-            csvContent += `Blok #${p.blockId},${p.lat},${p.lon},${p.vigor},${p.ndre},${p.ndvi},${p.msi},"${p.status}"\n`;
+        // URUTKAN BERDASARKAN SKOR ANOMALI TERTINGGI (URGENT FIRST)
+        allTargetPoints.sort((a, b) => (Number(b.anomaly_score) || 0) - (Number(a.anomaly_score) || 0));
+
+        let csvContent = "data:text/csv;charset=utf-8,Ranking_Prioritas,Blok_ID,Latitude,Longitude,Skor_Anomali,Tier_Prioritas,Status_Diagnosa,Rekomendasi_Tindakan,NDRE,NDVI,MSI\n";
+        allTargetPoints.forEach((p, idx) => {
+            const rank = idx + 1;
+            const score = p.anomaly_score !== undefined ? Number(p.anomaly_score).toFixed(4) : '0.0000';
+            const tier = p.priority_tier || 'Tier 1';
+            const action = (p.action || '-').replace(/"/g, '""');
+            csvContent += `${rank},Blok #${p.blockId},${p.lat},${p.lon},${score},"${tier}","${p.status}","${action}",${p.ndre},${p.ndvi},${p.msi}\n`;
         });
 
         const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
         link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `target_gps_sawit_sakit_${analyzedBlocks.length}blok_${Date.now()}.csv`);
+        link.setAttribute("download", `target_triage_gps_iforest_${analyzedBlocks.length}blok_${Date.now()}.csv`);
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
