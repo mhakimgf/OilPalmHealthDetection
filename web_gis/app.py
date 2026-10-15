@@ -46,7 +46,8 @@ def index():
 def predict_polygon():
     """
     Menerima GeoJSON poligon dari antarmuka Web GIS,
-    mengekstraksi data Sentinel-2 via GEE, dan mengembalikan hasil prediksi 2-layer.
+    mengekstraksi data Sentinel-2 via GEE, dan mengembalikan hasil prediksi 3-layer
+    berbasis periode triwulanan (per 3 bulan) dan agregasi grid 2x2 piksel (20m x 20m).
     """
     try:
         data = request.get_json()
@@ -55,18 +56,21 @@ def predict_polygon():
             
         coords = data['coordinates'] # Format: [[[lon, lat], [lon, lat], ...]]
         year = int(data.get('year', 2024))
+        quarter = str(data.get('quarter', 'Q4')).upper()
+        if quarter not in ['Q1', 'Q2', 'Q3', 'Q4']:
+            quarter = 'Q4'
         
         # Validasi poligon
         if len(coords[0]) < 3:
             return jsonify({'success': False, 'error': 'Poligon membutuhkan minimal 3 titik koordinat.'}), 400
             
-        print(f">> [API] Menerima poligon dengan {len(coords[0])} titik. Menjalankan analisis tahun {year}...")
+        print(f">> [API] Menerima poligon dengan {len(coords[0])} titik. Menjalankan analisis periode {year} {quarter} (Grid 20m x 20m)...")
         
         # Ekstrak data via GEE jika online
         if GEE_AVAILABLE:
-            result = process_gee_polygon(coords, year)
+            result = process_gee_polygon(coords, year, quarter)
         else:
-            result = simulate_polygon_analysis(coords)
+            result = simulate_polygon_analysis(coords, year, quarter)
             
         return jsonify({'success': True, 'data': result})
         
@@ -74,28 +78,40 @@ def predict_polygon():
         print(f">> [API Error] {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-def process_gee_polygon(coords, year):
-    """Memproses poligon nyata di Google Earth Engine dan memprediksi dengan XGBoost."""
+def process_gee_polygon(coords, year, quarter='Q4'):
+    """
+    Memproses poligon di Google Earth Engine berbasis:
+    1. Resolusi Temporal Triwulanan (Per 3 Bulan): Q1 (Jan-Mar), Q2 (Apr-Jun), Q3 (Jul-Sep), Q4 (Okt-Des)
+    2. Resolusi Spasial Grid 2x2 Piksel (20m x 20m = 400 m2 / rumpun ~4-5 pokok sawit)
+    3. Pipeline Inferensi Machine Learning 3-Layer (RF + iForest Anomaly Scoring)
+    """
     t_start_total = time.time()
     aoi = ee.Geometry.Polygon(coords)
     
-    start_date = f"{year}-01-01"
-    end_date   = f"{year}-12-31"
+    # 1. Definisi Jendela Waktu Triwulanan (Per 3 Bulan)
+    quarter_dates = {
+        'Q1': (f"{year}-01-01", f"{year}-03-31", "1 Jan - 31 Mar"),
+        'Q2': (f"{year}-04-01", f"{year}-06-30", "1 Apr - 30 Jun"),
+        'Q3': (f"{year}-07-01", f"{year}-09-30", "1 Jul - 30 Sep"),
+        'Q4': (f"{year}-10-01", f"{year}-12-31", "1 Okt - 31 Des"),
+    }
+    start_date, end_date, date_label = quarter_dates.get(quarter, (f"{year}-10-01", f"{year}-12-31", "1 Okt - 31 Des"))
+    quarter_label = f"{year} {quarter} ({date_label} {year})"
     
     t_gee_0 = time.time()
-    # Dual-Stage Cloud & Shadow Masking: QA60 Bitmask + Google CloudScore+ (cs >= 0.60)
+    # 2. Dual-Stage Cloud & Shadow Masking: QA60 Bitmask + Google CloudScore+ (cs >= 0.55)
     cs_plus = ee.ImageCollection('GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED')
     s2_col = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
         .filterBounds(aoi) \
         .filterDate(start_date, end_date) \
-        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 50))
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 75))
         
     def mask_clouds_and_shadows(img):
         # QA60 bitmask: bit 10 (opaque clouds), bit 11 (cirrus)
         qa = img.select('QA60')
         qa_mask = qa.bitwiseAnd(1 << 10).eq(0).And(qa.bitwiseAnd(1 << 11).eq(0))
-        # CloudScore+ band 'cs' (Clear Sky Score: 0.0 - 1.0, threshold >= 0.60 eliminates clouds & cloud shadows)
-        cs_mask = img.select('cs').gte(0.60)
+        # CloudScore+ band 'cs' (Clear Sky Score: threshold >= 0.55 untuk jendela 3 bulan)
+        cs_mask = img.select('cs').gte(0.55)
         return img.updateMask(qa_mask.And(cs_mask))
 
     s2 = s2_col.linkCollection(cs_plus, ['cs']) \
@@ -115,20 +131,21 @@ def process_gee_polygon(coords, year):
     ndbi = s2.normalizedDifference(['B11', 'B8']).rename('NDBI')
     msi  = s2.select('B11').divide(s2.select('B8').add(1e-6)).rename('MSI')
 
-    # GLCM Texture extraction
+    # GLCM Texture extraction pada resolusi native sebelum agregasi grid
     nir_scaled = s2.select('B8').multiply(64).toInt().rename('NIR_scaled')
     glcm = nir_scaled.glcmTexture(size=3)
     texture = glcm.select(['NIR_scaled_contrast', 'NIR_scaled_var', 'NIR_scaled_ent']).rename(['GLCM_Contrast', 'GLCM_Variance', 'GLCM_Entropy'])
 
     composite = raw_bands.addBands([ndvi, evi, savi, ndre, ndwi, ndbi, msi, texture])
     
-    # Hitung estimasi luas area (hektar)
+    # 3. Hitung estimasi luas area (hektar)
     area_sqm = aoi.area().getInfo()
     area_ha  = round(area_sqm / 10000.0, 2)
     
-    # Sampling grid titik (skala 10m)
-    scale = 10 if area_ha < 100 else 20
-    sampled = composite.sample(region=aoi, scale=scale, geometries=True, numPixels=2500)
+    # 4. Agregasi Spasial ke Unit Grid 2x2 Piksel Sentinel-2 (20m x 20m = 400 m2)
+    # Sentinel-2 10m x 2 = scale 20m. Setiap sample mewakili rata-rata sel 20m x 20m.
+    scale = 20
+    sampled = composite.sample(region=aoi, scale=scale, geometries=True, numPixels=3500)
     features = sampled.getInfo().get('features', [])
     t_gee_1 = time.time()
     gee_time_sec = round(t_gee_1 - t_gee_0, 2)
@@ -150,16 +167,18 @@ def process_gee_polygon(coords, year):
                 'area_ha': area_ha, 'total_points': 0, 'palm_points': 0,
                 'filtered_points': 0, 'healthy_count': 0, 'healthy_pct': 0,
                 'stressed_count': 0, 'stressed_pct': 0, 'sick_count': 0, 'sick_pct': 0,
-                'alert': 'Tidak ada data', 'alert_class': 'warning',
+                'alert': f'Tidak ada citra bebas awan pada periode {quarter_label}', 'alert_class': 'warning',
                 'ml_timing': {'elapsed_sec': 0, 'elapsed_ms': 0, 'ms_per_sample': 0},
-                'gee_time_sec': gee_time_sec
+                'gee_time_sec': gee_time_sec,
+                'quarter_label': quarter_label,
+                'spatial_unit': "Grid 2x2 Piksel (20m x 20m / 400 m2)"
             }
         }
         
     # Jalankan Prediksi dengan Model Machine Learning (3-Layer Pipeline)
     df_pred, ml_timing = predict_pipeline(df, return_timing=True)
     
-    # Pemetaan hasil prediksi ke titik visualisasi Web GIS
+    # Pemetaan hasil prediksi ke sel grid visualisasi Web GIS (20m x 20m kotak)
     points = []
     sick_count = 0
     stressed_count = 0
@@ -167,7 +186,7 @@ def process_gee_polygon(coords, year):
     young_count = 0
     filtered_count = 0
     
-    for _, row in df_pred.iterrows():
+    for idx, row in df_pred.iterrows():
         status = row['health_status']
         tier = row.get('priority_tier', '🟢 Tier 3: Normal Sehat')
         action = row.get('recommended_action', '-')
@@ -195,9 +214,23 @@ def process_gee_polygon(coords, year):
             color = '#94a3b8'  # Abu-abu (Disaring: Non-Sawit/Jalan)
             filtered_count += 1
             
+        lat = float(row['lat'])
+        lon = float(row['lon'])
+        
+        # Hitung bounding box kotak 20m x 20m (2x2 piksel Sentinel-2)
+        # 10m ke utara/selatan dan 10m ke barat/timur
+        dlat = 10.0 / 110574.0
+        dlon = 10.0 / (111320.0 * np.cos(np.radians(lat)))
+        grid_bounds = [
+            [round(lat - dlat, 6), round(lon - dlon, 6)],
+            [round(lat + dlat, 6), round(lon + dlon, 6)]
+        ]
+            
         points.append({
-            'lat': float(row['lat']),
-            'lon': float(row['lon']),
+            'grid_id': f"G_{idx+1}",
+            'lat': lat,
+            'lon': lon,
+            'bounds': grid_bounds,
             'status': str(status),
             'priority_tier': str(tier),
             'action': str(action),
@@ -207,7 +240,8 @@ def process_gee_polygon(coords, year):
             'ndvi': round(float(row.get('NDVI', 0)), 3),
             'ndre': round(float(row.get('NDRE', 0)), 3),
             'ndbi': round(float(row.get('NDBI', 0)), 3),
-            'msi': round(float(row.get('MSI', 0)), 3)
+            'msi': round(float(row.get('MSI', 0)), 3),
+            'unit_info': "Grid 20m x 20m (400 m2 / ~4-5 pokok sawit)"
         })
         
     total_pts = len(points)
@@ -248,12 +282,25 @@ def process_gee_polygon(coords, year):
             'alert_class': alert_class,
             'ml_timing': ml_timing,
             'gee_time_sec': gee_time_sec,
+            'quarter_label': quarter_label,
+            'quarter': quarter,
+            'year': year,
+            'spatial_unit': "Grid 2x2 Piksel (20m x 20m = 400 m2)",
             'model_engine': 'Random Forest 2-Layer + Isolation Forest Anomaly Scoring'
         }
     }
 
-def simulate_polygon_analysis(coords):
-    """Simulasi cerdas menjalankan model ML pada titik sintetis jika GEE offline."""
+def simulate_polygon_analysis(coords, year=2024, quarter='Q4'):
+    """Simulasi cerdas menjalankan model ML pada unit grid sintetis jika GEE offline."""
+    quarter_dates = {
+        'Q1': "1 Jan - 31 Mar",
+        'Q2': "1 Apr - 30 Jun",
+        'Q3': "1 Jul - 30 Sep",
+        'Q4': "1 Okt - 31 Des",
+    }
+    date_label = quarter_dates.get(quarter, "1 Okt - 31 Des")
+    quarter_label = f"{year} {quarter} ({date_label} {year})"
+
     lons = [c[0] for c in coords[0]]
     lats = [c[1] for c in coords[0]]
     min_lon, max_lon = min(lons), max(lons)
@@ -261,7 +308,7 @@ def simulate_polygon_analysis(coords):
     
     records = []
     np.random.seed(42)
-    for _ in range(250):
+    for _ in range(150):
         records.append({
             'lon': np.random.uniform(min_lon, max_lon),
             'lat': np.random.uniform(min_lat, max_lat),
@@ -293,7 +340,7 @@ def simulate_polygon_analysis(coords):
     young_count = 0
     filtered_count = 0
     
-    for _, row in df_pred.iterrows():
+    for idx, row in df_pred.iterrows():
         status = row['health_status']
         tier = row.get('priority_tier', '🟢 Tier 3: Normal Sehat')
         action = row.get('recommended_action', '-')
@@ -320,9 +367,20 @@ def simulate_polygon_analysis(coords):
             color = '#94a3b8'
             filtered_count += 1
             
+        lat = float(row['lat'])
+        lon = float(row['lon'])
+        dlat = 10.0 / 110574.0
+        dlon = 10.0 / (111320.0 * np.cos(np.radians(lat)))
+        grid_bounds = [
+            [round(lat - dlat, 6), round(lon - dlon, 6)],
+            [round(lat + dlat, 6), round(lon + dlon, 6)]
+        ]
+            
         points.append({
-            'lat': float(row['lat']),
-            'lon': float(row['lon']),
+            'grid_id': f"G_{idx+1}",
+            'lat': lat,
+            'lon': lon,
+            'bounds': grid_bounds,
             'status': str(status),
             'priority_tier': str(tier),
             'action': str(action),
@@ -332,7 +390,8 @@ def simulate_polygon_analysis(coords):
             'ndvi': round(float(row.get('NDVI', 0)), 3),
             'ndre': round(float(row.get('NDRE', 0)), 3),
             'ndbi': round(float(row.get('NDBI', 0)), 3),
-            'msi': round(float(row.get('MSI', 0)), 3)
+            'msi': round(float(row.get('MSI', 0)), 3),
+            'unit_info': "Grid 20m x 20m (400 m2 / ~4-5 pokok sawit)"
         })
         
     total_pts = len(points)
@@ -362,6 +421,10 @@ def simulate_polygon_analysis(coords):
             'alert_class': "warning",
             'ml_timing': ml_timing,
             'gee_time_sec': 0.01,
+            'quarter_label': quarter_label,
+            'quarter': quarter,
+            'year': year,
+            'spatial_unit': "Grid 2x2 Piksel (20m x 20m = 400 m2)",
             'model_engine': 'Random Forest 2-Layer + Isolation Forest Anomaly Scoring (Simulasi)'
         }
     }

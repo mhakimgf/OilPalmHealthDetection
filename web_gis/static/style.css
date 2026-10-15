@@ -533,8 +533,13 @@ body {
     line-height: 1;
 }
 
-/* Palm Point Marker Cursor */
-.palm-point-marker {
+/* Palm Point Marker & Grid Cell Cursor */
+.palm-point-marker,
+.palm-grid-cell {
     cursor: pointer !important;
-    transition: transform 0.15s ease;
+    transition: all 0.15s ease;
+}
+
+.palm-grid-cell:hover {
+    filter: brightness(1.25);
 }

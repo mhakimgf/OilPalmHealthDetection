@@ -398,14 +398,31 @@ Dengan melatih ulang seluruh lapisan model pada dataset baru yang diekstraksi me
 2. **Export Target GPS Lapangan (`target_ground_check_prioritas.csv`)**:
    Dihasilkan otomatis dengan pengurutan ranking menurun berdasarkan skor anomali ($\text{Skor}_1 \ge \text{Skor}_2 \ge \dots$). Tim agronomis kebun dapat langsung mengimpor file ini ke perangkat handheld GPS atau aplikasi *Avenza Maps* untuk pemeriksaan batang pohon nomor 1 (paling darurat) hingga seterusnya secara efisien.
 
+### 7.5. Resolusi Temporal Triwulanan (Per 3 Bulan) & Agregasi Grid 2×2 Piksel (20m × 20m)
+Untuk mengatasi kelemahan komposit tahunan (yang meratakan/menghilangkan lonjakan dinamika kanopi jangka pendek) dan mengurangi noise piksel tunggal (10m):
+1. **Resolusi Temporal Triwulanan (Kalender Standar Q1–Q4)**:
+   - **Q1**: 1 Januari – 31 Maret (Fase Awal Tahun)
+   - **Q2**: 1 April – 30 Juni (Fase Transisi Musim)
+   - **Q3**: 1 Juli – 30 September (Fase Kering / Potensi Stres Air Terbesar)
+   - **Q4**: 1 Oktober – 31 Desember (Fase Puncak Hujan Akhir Tahun)
+   Jendela waktu 3 bulan memberikan peredaman awan yang optimal sekaligus cukup sensitif untuk mendeteksi awal mula infeksi atau stres kanopi sebelum menyebar luas.
+
+2. **Agregasi Spasial Grid 2×2 Piksel (20m × 20m = 400 m²)**:
+   - Resolusi asli band Sentinel-2 adalah $10\text{m} \times 10\text{m}$ per piksel.
+   - Dengan menggabungkan petak $2 \times 2$ piksel, terbentuk unit observasi berukuran **$20\text{m} \times 20\text{m}$ ($400\text{ m}^2$)**.
+   - Pada pola tanam standar perkebunan sawit ($9\text{m} \times 9\text{m}$ segitiga sama sisi, densitas $\sim 136-143$ pokok/ha), 1 unit grid $20\text{m} \times 20\text{m}$ mencakup **rumpun $\sim 4-5$ pokok kelapa sawit**.
+   - **Keunggulan Teknis**: Mengeliminasi *sub-pixel noise* dan pantulan tanah kosong di sela pelepah (*inter-row soil background*), sehingga nilai spektral mencerminkan kesehatan biomassa kanopi rumpun tanaman secara stabil. Di antarmuka Web GIS, setiap petak grid digambarkan sebagai kotak poligon teratur yang langsung dapat diidentifikasi oleh mandor di lapangan.
+
 ---
 
 ## 8. Kesimpulan Metodologi
 
-Integrasi arsitektur **Random Forest 2-Layer + Isolation Forest Anomaly Scoring & Directional Gatekeeper** berhasil mentransformasi sistem monitoring kebun sawit dari sekadar klasifikasi piksel spektral pasif menjadi **sistem pendukung keputusan proteksi tanaman presisi (*precision crop protection decision support system*)**.
+Integrasi arsitektur **Random Forest 2-Layer + Isolation Forest Anomaly Scoring & Directional Gatekeeper** berbasis **resolusi temporal triwulanan (per 3 bulan)** dan **agregasi spasial grid 2×2 piksel (20m × 20m)** berhasil mentransformasi sistem monitoring kebun sawit dari sekadar klasifikasi piksel spektral pasif menjadi **sistem pendukung keputusan proteksi tanaman presisi (*precision crop protection decision support system*)**.
 
 Pendekatan ini berhasil menyelesaikan kendala utama remote sensing sawit:
 1. Menghilangkan *false positive* dari jalanan dan tanah terbuka dengan *bio-physical guardrail*.
 2. Menghilangkan distorsi bayangan awan dengan *Dual-Stage CloudScore+ & QA60 Masking*.
 3. Mengatasi ketimpangan kelas pohon sakit minoritas dengan *Isolation Forest shallow trees*.
 4. Memberikan urutan prioritas intervensi nyata di lapangan (*triage ranking*) melalui *Continuous Anomaly Score*.
+5. Menangkap fluktuasi kanopi lebih cepat melalui komposit triwulanan (Q1–Q4) pada unit observasi rumpun 20m × 20m yang praktis untuk operasional kebun.
+

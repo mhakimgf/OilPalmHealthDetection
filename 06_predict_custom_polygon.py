@@ -31,14 +31,16 @@ try:
 except Exception as e:
     print(f"Error inisialisasi GEE: {e}")
 
-def inspect_polygon_health(polygon_ee, nama_blok="Blok_Kebun_Uji", year=2024, output_dir="output_polygon"):
+def inspect_polygon_health(polygon_ee, nama_blok="Blok_Kebun_Uji", year=2024, quarter="Q4", output_dir="output_polygon"):
     """
-    Menganalisis dan memetakan bagian yang sakit di dalam poligon yang diberikan.
+    Menganalisis dan memetakan bagian yang sakit di dalam poligon yang diberikan
+    berbasis periode triwulanan (per 3 bulan) dan unit spasial grid 2x2 piksel (20m x 20m).
     
     Parameters:
     - polygon_ee : ee.Geometry atau ee.FeatureCollection poligon kebun
     - nama_blok  : Nama area/blok untuk penamaan file & judul peta
     - year       : Tahun citra Sentinel-2 yang dianalisis
+    - quarter    : Kuartal triwulanan ('Q1', 'Q2', 'Q3', 'Q4')
     - output_dir : Folder penyimpanan peta hasil inspeksi
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -55,20 +57,26 @@ def inspect_polygon_health(polygon_ee, nama_blok="Blok_Kebun_Uji", year=2024, ou
         aoi = polygon_ee
     else:
         aoi = ee.Feature(polygon_ee).geometry()
-    start_date = f"{year}-01-01"
-    end_date   = f"{year}-12-31"
+        
+    quarter_dates = {
+        'Q1': (f"{year}-01-01", f"{year}-03-31", "1 Jan - 31 Mar"),
+        'Q2': (f"{year}-04-01", f"{year}-06-30", "1 Apr - 30 Jun"),
+        'Q3': (f"{year}-07-01", f"{year}-09-30", "1 Jul - 30 Sep"),
+        'Q4': (f"{year}-10-01", f"{year}-12-31", "1 Okt - 31 Des"),
+    }
+    start_date, end_date, date_label = quarter_dates.get(quarter.upper(), (f"{year}-10-01", f"{year}-12-31", "1 Okt - 31 Des"))
     
-    print(f"[1/4] Mengambil citra Sentinel-2 bebas awan & bayangan awan (QA60 + CloudScore+) tahun {year}...")
+    print(f"[1/4] Mengambil citra Sentinel-2 bebas awan periode {year} {quarter} ({date_label})...")
     cs_plus = ee.ImageCollection('GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED')
     s2_col = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
         .filterBounds(aoi) \
         .filterDate(start_date, end_date) \
-        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 50))
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 75))
         
     def mask_clouds_and_shadows(img):
         qa = img.select('QA60')
         qa_mask = qa.bitwiseAnd(1 << 10).eq(0).And(qa.bitwiseAnd(1 << 11).eq(0))
-        cs_mask = img.select('cs').gte(0.60)
+        cs_mask = img.select('cs').gte(0.55)
         return img.updateMask(qa_mask.And(cs_mask))
 
     s2 = s2_col.linkCollection(cs_plus, ['cs']) \
@@ -88,17 +96,17 @@ def inspect_polygon_health(polygon_ee, nama_blok="Blok_Kebun_Uji", year=2024, ou
     
     composite = ee.Image.cat([ndvi, ndre, ndbi, msi, nir_red, b4])
     
-    # 3. Sampling titik reguler di dalam poligon untuk analisis spasial
-    print("[2/4] Mengekstrak grid titik piksel di dalam poligon (skala 10 meter)...")
+    # 3. Sampling grid 2x2 piksel (20m x 20m = 400 m2) di dalam poligon
+    print("[2/4] Mengekstrak grid 2x2 piksel (20m x 20m = 400 m2 / rumpun ~4-5 pokok)...")
     sampled = composite.sample(
         region=aoi,
-        scale=10,
+        scale=20,
         geometries=True,
-        numPixels=3000
+        numPixels=3500
     )
     
     features = sampled.getInfo().get('features', [])
-    print(f"      Berhasil mengekstrak {len(features):,} titik observasi di dalam poligon.")
+    print(f"      Berhasil mengekstrak {len(features):,} unit grid 20m di dalam poligon.")
     
     if len(features) == 0:
         print("Tidak ada piksel yang berhasil diekstrak. Cek geometri poligon!")

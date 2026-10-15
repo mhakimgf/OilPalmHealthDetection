@@ -88,6 +88,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnClear = document.getElementById('btnClear');
     const btnRun = document.getElementById('btnRun');
     const selectYear = document.getElementById('selectYear');
+    const selectQuarter = document.getElementById('selectQuarter');
     const polygonStatus = document.getElementById('polygonStatus');
     const loadingBox = document.getElementById('loadingBox');
     const loadingStep = document.getElementById('loadingStep');
@@ -95,6 +96,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnExportCSV = document.getElementById('btnExportCSV');
     const toggleHeatmap = document.getElementById('toggleHeatmap');
     const valBlockCount = document.getElementById('valBlockCount');
+    const valQuarterBadge = document.getElementById('valQuarterBadge');
 
     // Handle Geoman Draw Event: Membuat poligon pending baru
     map.on('pm:create', (e) => {
@@ -226,14 +228,15 @@ document.addEventListener('DOMContentLoaded', () => {
         loadingBox.style.display = 'flex';
 
         const year = selectYear.value;
+        const quarter = selectQuarter ? selectQuarter.value : 'Q4';
 
         // Step simulation text
-        loadingStep.innerText = "1/3 Mengakses server Google Earth Engine...";
+        loadingStep.innerText = `1/3 Mengakses server Google Earth Engine (Periode ${year} ${quarter})...`;
         setTimeout(() => {
-            loadingStep.innerText = "2/3 Memfilter citra Sentinel-2 bebas awan & menghitung Red Edge...";
+            loadingStep.innerText = "2/3 Mengagregasi grid 20m×20m (2×2 piksel) & filter CloudScore+...";
         }, 1500);
         setTimeout(() => {
-            loadingStep.innerText = "3/3 Menjalankan Pipeline 2-Layer AI & Health Scoring...";
+            loadingStep.innerText = "3/3 Menjalankan Pipeline 3-Layer AI & Isolation Forest Anomaly Scoring...";
         }, 3000);
 
         try {
@@ -242,7 +245,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     coordinates: currentPolygonCoords,
-                    year: year
+                    year: year,
+                    quarter: quarter
                 })
             });
 
@@ -317,27 +321,32 @@ document.addEventListener('DOMContentLoaded', () => {
             const anomScore = pt.anomaly_score !== undefined ? Number(pt.anomaly_score).toFixed(3) : '-';
             const tierBadge = pt.priority_tier || (isTier1 ? '🔴 Tier 1: Karantina' : (isTier2 ? '🟡 Tier 2: Stres' : '🟢 Tier 3: Sehat'));
             const actionText = pt.action || '-';
+            const gridLabel = pt.grid_id || 'Grid';
+            const quarterText = data.summary.quarter_label ? data.summary.quarter_label.split('(')[0].trim() : 'Triwulanan';
 
             const popupHtml = `
-                <div style="font-size: 12px; line-height: 1.5; min-width: 220px; max-width: 280px;">
+                <div style="font-size: 12px; line-height: 1.5; min-width: 230px; max-width: 290px;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-                        <span style="font-size: 11px; color: #64748b; font-weight: 700;">
-                            <i class="fa-solid fa-draw-polygon"></i> Blok #${blockId}
+                        <span style="font-size: 11px; color: #38bdf8; font-weight: 700;">
+                            <i class="fa-solid fa-table-cells-large"></i> ${gridLabel} &bull; Blok #${blockId}
                         </span>
-                        <span style="font-size: 10px; background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 4px;">
-                            ${pt.lat.toFixed(5)}, ${pt.lon.toFixed(5)}
+                        <span style="font-size: 10px; background: rgba(56,189,248,0.12); color: #38bdf8; padding: 1px 6px; border-radius: 4px; font-weight: 600;">
+                            ${quarterText}
                         </span>
+                    </div>
+                    <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 6px;">
+                        <i class="fa-solid fa-vector-square"></i> Grid 20m×20m (400 m² / ~4–5 pokok) &bull; ${pt.lat.toFixed(5)}, ${pt.lon.toFixed(5)}
                     </div>
                     <div style="padding: 4px 8px; border-radius: 4px; background: ${isTier1 ? 'rgba(239,68,68,0.18)' : (isTier2 ? 'rgba(245,158,11,0.18)' : (isFiltered ? 'rgba(148,163,184,0.12)' : 'rgba(34,197,94,0.15)'))}; margin-bottom: 6px;">
                         <b style="color: ${pt.color}; font-size: 12px;">${pt.status}</b>
                     </div>
-                    <div style="margin-bottom: 6px; padding: 4px 6px; background: rgba(0,0,0,0.2); border-radius: 4px; font-size: 11px;">
+                    <div style="margin-bottom: 6px; padding: 4px 6px; background: rgba(0,0,0,0.25); border-radius: 4px; font-size: 11px;">
                         <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #94a3b8;">Skor Anomali:</span>
+                            <span style="color: #94a3b8;">Skor Anomali iForest:</span>
                             <b style="color: ${Number(anomScore) >= 0.65 ? '#ef4444' : (Number(anomScore) >= 0.40 ? '#f59e0b' : '#38bdf8')}; font-size: 12px;">${anomScore}</b>
                         </div>
                         <div style="display: flex; justify-content: space-between; margin-top: 2px;">
-                            <span style="color: #94a3b8;">Prioritas:</span>
+                            <span style="color: #94a3b8;">Prioritas Triage:</span>
                             <span style="font-weight: 600;">${tierBadge}</span>
                         </div>
                     </div>
@@ -354,32 +363,52 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>
             `;
 
-            const marker = L.circleMarker([pt.lat, pt.lon], {
-                pane: 'palmPointsPane', // Menjamin titik SELALU di atas poligon
-                radius: isTier1 ? 7.5 : (isTier2 ? 6 : (isFiltered ? 3 : 5)),
-                color: isTier1 ? '#ffffff' : (isTier2 ? '#ffffff' : pt.color),
-                fillColor: pt.color,
-                fillOpacity: isTier1 ? 1.0 : (isTier2 ? 0.9 : (isFiltered ? 0.35 : 0.85)),
-                weight: isTier1 ? 2 : (isTier2 ? 1.5 : (isFiltered ? 0.5 : 1)),
-                className: 'palm-point-marker'
-            }).bindPopup(popupHtml, { autoPan: true });
+            let cellLayer;
+            if (pt.bounds && Array.isArray(pt.bounds) && pt.bounds.length === 2) {
+                // Render petak Grid 20m x 20m (2x2 piksel) nyata di atas peta
+                cellLayer = L.rectangle(pt.bounds, {
+                    pane: 'palmPointsPane',
+                    color: isTier1 ? '#ef4444' : (isTier2 ? '#f59e0b' : (isFiltered ? '#64748b' : pt.color)),
+                    weight: isTier1 ? 2.5 : (isTier2 ? 2 : (isFiltered ? 0.75 : 1.2)),
+                    fillColor: pt.color,
+                    fillOpacity: isTier1 ? 0.80 : (isTier2 ? 0.70 : (isFiltered ? 0.20 : 0.60)),
+                    className: 'palm-grid-cell'
+                }).bindPopup(popupHtml, { autoPan: true });
 
-            // Efek hover interaktif halus pada titik
-            marker.on('mouseover', function () {
-                this.setRadius(isTier1 ? 9.5 : (isTier2 ? 7.5 : (isFiltered ? 4.5 : 7)));
-                this.bringToFront();
-            });
+                cellLayer.on('mouseover', function () {
+                    this.setStyle({
+                        weight: 3.5,
+                        color: '#ffffff',
+                        fillOpacity: 0.95
+                    });
+                    this.bringToFront();
+                });
 
-            marker.on('mouseout', function () {
-                this.setRadius(isTier1 ? 7.5 : (isTier2 ? 6 : (isFiltered ? 3 : 5)));
-            });
+                cellLayer.on('mouseout', function () {
+                    this.setStyle({
+                        weight: isTier1 ? 2.5 : (isTier2 ? 2 : (isFiltered ? 0.75 : 1.2)),
+                        color: isTier1 ? '#ef4444' : (isTier2 ? '#f59e0b' : (isFiltered ? '#64748b' : pt.color)),
+                        fillOpacity: isTier1 ? 0.80 : (isTier2 ? 0.70 : (isFiltered ? 0.20 : 0.60))
+                    });
+                });
+            } else {
+                // Fallback marker titik jika koordinat bounds belum ada
+                cellLayer = L.circleMarker([pt.lat, pt.lon], {
+                    pane: 'palmPointsPane',
+                    radius: isTier1 ? 7.5 : (isTier2 ? 6 : (isFiltered ? 3 : 5)),
+                    color: isTier1 ? '#ffffff' : (isTier2 ? '#ffffff' : pt.color),
+                    fillColor: pt.color,
+                    fillOpacity: isTier1 ? 1.0 : (isTier2 ? 0.9 : (isFiltered ? 0.35 : 0.85)),
+                    weight: isTier1 ? 2 : (isTier2 ? 1.5 : (isFiltered ? 0.5 : 1)),
+                    className: 'palm-point-marker'
+                }).bindPopup(popupHtml, { autoPan: true });
+            }
 
-            // Pastikan event klik pada titik tidak bocor ke peta/poligon
-            marker.on('click', (e) => {
+            cellLayer.on('click', (e) => {
                 L.DomEvent.stopPropagation(e);
             });
 
-            blockPointsGroup.addLayer(marker);
+            blockPointsGroup.addLayer(cellLayer);
 
             // Anomaly Heatmap: Beri bobot intensitas kontinu sesuai skor anomali iForest
             if (pt.anomaly_score !== undefined && pt.anomaly_score >= 0.40 && !isFiltered) {
@@ -527,8 +556,16 @@ document.addEventListener('DOMContentLoaded', () => {
             valBlockCount.innerText = `${analyzedBlocks.length} Blok Aktif`;
         }
 
+        const latestBlock = analyzedBlocks[analyzedBlocks.length - 1];
+        if (valQuarterBadge && latestBlock && latestBlock.data.summary) {
+            const sum = latestBlock.data.summary;
+            valQuarterBadge.innerText = sum.quarter_label ?
+                `${sum.year || selectYear.value} ${sum.quarter || (selectQuarter ? selectQuarter.value : 'Q4')}` :
+                `${selectYear.value} ${selectQuarter ? selectQuarter.value : 'Q4'}`;
+        }
+
         document.getElementById('valArea').innerText = `${totalArea.toFixed(2)} Ha`;
-        document.getElementById('valPoints').innerText = `${totalPoints} Pkt`;
+        document.getElementById('valPoints').innerText = `${totalPoints} Grid`;
         const valAvgElem = document.getElementById('valAvgScore');
         if (valAvgElem) valAvgElem.innerText = avgAnomaly;
 
@@ -538,7 +575,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const filteredElem = document.getElementById('valFilteredPoints');
         if (filteredElem) {
-            filteredElem.innerText = `${totalFiltered} Pkt`;
+            filteredElem.innerText = `${totalFiltered} Grid`;
         }
 
         document.getElementById('barHealthy').style.width = `${healthyPct}%`;
@@ -564,7 +601,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Tampilkan metrik kecepatan inferensi ML dari blok terbaru
-        const latestBlock = analyzedBlocks[analyzedBlocks.length - 1];
         if (latestBlock && latestBlock.data.summary.ml_timing) {
             const s = latestBlock.data.summary;
             const mlElem = document.getElementById('valMlTime');
@@ -573,7 +609,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (mlElem) mlElem.innerText = `${s.ml_timing.elapsed_sec}s (${s.ml_timing.elapsed_ms} ms)`;
             if (geeElem) geeElem.innerText = `${s.gee_time_sec || 0}s`;
-            if (msPointElem) msPointElem.innerText = `${s.ml_timing.ms_per_sample} ms/pohon`;
+            if (msPointElem) msPointElem.innerText = `${s.ml_timing.ms_per_sample} ms/grid`;
         }
 
         // Render daftar blok aktif di sidebar
@@ -590,15 +626,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
         analyzedBlocks.forEach(b => {
             const s = b.data.summary;
+            const qStr = s.quarter_label ? s.quarter_label.split('(')[0].trim() : (selectYear.value + ' Q4');
             const item = document.createElement('div');
             item.className = 'active-block-item';
             item.innerHTML = `
                 <div class="block-info">
                     <span style="font-size: 12px; font-weight: 700; color: #38bdf8;">
-                        <i class="fa-solid fa-draw-polygon"></i> Blok #${b.id}
+                        <i class="fa-solid fa-table-cells-large"></i> Blok #${b.id} &bull; <small style="color:#a7f3d0;">${qStr}</small>
                     </span>
                     <span style="font-size: 11px; color: var(--text-muted);">
-                        ${s.area_ha} Ha &bull; ${s.palm_points} Pohon ${s.sick_count > 0 ? `<b style="color:#ef4444;">(${s.sick_count} Sakit)</b>` : ''}
+                        ${s.area_ha} Ha &bull; ${s.palm_points} Grid (20m) ${s.sick_count > 0 ? `<b style="color:#ef4444;">(${s.sick_count} Sakit)</b>` : ''}
                     </span>
                 </div>
                 <div class="block-actions">

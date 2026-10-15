@@ -72,13 +72,32 @@
                 <!-- Section 2: Parameter & Eksekusi -->
                 <div class="control-card">
                     <h3><i class="fa-solid fa-sliders"></i> 2. Parameter Analisis</h3>
-                    <div class="form-row">
-                        <label for="selectYear">Tahun Citra Sentinel-2:</label>
-                        <select id="selectYear" class="form-select">
-                            <option value="2024" selected>2024 (Terbaru)</option>
-                            <option value="2023">2023</option>
-                            <option value="2022">2022</option>
-                        </select>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px;">
+                        <div class="form-row" style="margin-bottom: 0;">
+                            <label for="selectYear"><i class="fa-regular fa-calendar"></i> Tahun:</label>
+                            <select id="selectYear" class="form-select">
+                                <option value="2024" selected>2024 (Terbaru)</option>
+                                <option value="2023">2023</option>
+                                <option value="2022">2022</option>
+                                <option value="2021">2021</option>
+                                <option value="2020">2020</option>
+                            </select>
+                        </div>
+                        <div class="form-row" style="margin-bottom: 0;">
+                            <label for="selectQuarter"><i class="fa-solid fa-clock-rotate-left"></i> Kuartal (3 Bulan):</label>
+                            <select id="selectQuarter" class="form-select">
+                                <option value="Q4" selected>Q4 (Okt – Des)</option>
+                                <option value="Q3">Q3 (Jul – Sep)</option>
+                                <option value="Q2">Q2 (Apr – Jun)</option>
+                                <option value="Q1">Q1 (Jan – Mar)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Badge Unit Grid 2x2 Piksel (20m x 20m) -->
+                    <div style="background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 6px; padding: 7px 10px; margin-bottom: 12px; font-size: 11px; color: #38bdf8; display: flex; align-items: center; gap: 7px;">
+                        <i class="fa-solid fa-table-cells-large" style="font-size: 13px;"></i>
+                        <span><b>Agregasi Spasial:</b> Grid 2×2 Piksel (20m × 20m = 400 m² / ~4–5 pokok)</span>
                     </div>
 
                     <button id="btnRun" class="btn btn-primary btn-block" disabled>
@@ -98,7 +117,10 @@
                     <div class="result-header">
                         <div>
                             <h3 style="margin-bottom: 2px;"><i class="fa-solid fa-chart-pie"></i> Diagnosa Kesehatan</h3>
-                            <span id="valBlockCount" style="font-size: 11px; color: #38bdf8; font-weight: 600; background: rgba(56, 189, 248, 0.1); padding: 2px 8px; border-radius: 12px; border: 1px solid rgba(56, 189, 248, 0.3);">0 Blok Aktif</span>
+                            <div style="display: flex; gap: 6px; align-items: center; margin-top: 3px;">
+                                <span id="valBlockCount" style="font-size: 11px; color: #38bdf8; font-weight: 600; background: rgba(56, 189, 248, 0.1); padding: 2px 8px; border-radius: 12px; border: 1px solid rgba(56, 189, 248, 0.3);">0 Blok Aktif</span>
+                                <span id="valQuarterBadge" style="font-size: 10px; color: #a7f3d0; font-weight: 600; background: rgba(16, 185, 129, 0.1); padding: 2px 7px; border-radius: 12px; border: 1px solid rgba(16, 185, 129, 0.25);">2024 Q4</span>
+                            </div>
                         </div>
                         <span id="badgeAlert" class="alert-badge warning">WASPADA</span>
                     </div>
@@ -109,7 +131,7 @@
                             <span id="valArea" class="kpi-value">- Ha</span>
                         </div>
                         <div class="kpi-item">
-                            <span class="kpi-label">Titik Pohon</span>
+                            <span class="kpi-label">Grid (2×2 Px)</span>
                             <span id="valPoints" class="kpi-value">-</span>
                         </div>
                         <div class="kpi-item">
